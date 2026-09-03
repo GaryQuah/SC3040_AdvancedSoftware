@@ -1,20 +1,32 @@
 # Dependencies
-/node_modules
-/.pnp
+node_modules/
+.pnp
 .pnp.js
 
 # Next.js build output & cache
-/.next/
-/out/
+.next/
+out/
 
 # TypeScript build info cache
 tsconfig.tsbuildinfo
 
+# Python & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+ENV/
+
 # Production build artifacts
-build
+build/
+dist/
 
 # Environment files with secrets
+.env
 .env*.local
+!.env.example
 
 # Debug logs
 npm-debug.log*
@@ -24,3 +36,5 @@ yarn-error.log*
 # OS / Editor files
 .DS_Store
 *.pem
+.vscode/
+.idea/

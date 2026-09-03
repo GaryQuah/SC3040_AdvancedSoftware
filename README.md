@@ -1,260 +1,230 @@
-# Endurance AI — Scientific Training Load & AI Recovery Platform
+# Endurance AI — Two-Tier Endurance Intelligence & Recovery Platform
 
-> **Endurance AI** is an advanced full-stack endurance intelligence platform. It automatically ingests athlete telemetry via Strava webhooks, calculates physiological training load metrics (Banister's TRIMP and Acute:Chronic Workload Ratio), and leverages Google Gemini 2.5 Flash to synthesize personalized workout and recovery recommendations.
+> **Endurance AI** is a production-grade, two-tier endurance training analytics and recovery platform:
+> 1. **Frontend (`frontend/`):** Next.js 15+ App Router, React 19, TypeScript, Tailwind CSS, and Recharts delivering real-time workload matrixes, cardiac drift curves, and AI coaching summaries.
+> 2. **Backend (`backend/`):** Python FastAPI service powered by NumPy-vectorized Banister TRIMP & ACWR physiological modeling, an integrated Redis task consumer, and Google Gemini 2.5 Flash recovery synthesis.
 
 ---
 
 ## 📑 Table of Contents
 
 - [Overview](#overview)
-- [System Architecture](#system-architecture)
+- [Two-Tier System Architecture](#two-tier-system-architecture)
+- [Directory Structure](#directory-structure)
 - [Key Features](#key-features)
 - [Tech Stack](#tech-stack)
-- [Directory Structure](#directory-structure)
-- [Prerequisites](#prerequisites)
-- [Quickstart Guide](#quickstart-guide)
-  - [1. Clone and Install Dependencies](#1-clone-and-install-dependencies)
-  - [2. Configure Environment Variables](#2-configure-environment-variables)
+- [Quickstart with Docker Compose](#quickstart-with-docker-compose)
+- [Manual Local Development](#manual-local-development)
+  - [1. Backend Setup (FastAPI & Redis)](#1-backend-setup-fastapi--redis)
+  - [2. Frontend Setup (Next.js 15)](#2-frontend-setup-nextjs-15)
   - [3. Database Setup (Supabase)](#3-database-setup-supabase)
-  - [4. Start the Local Server](#4-start-the-local-server)
-- [Webhooks & Asynchronous Processing](#webhooks--asynchronous-processing)
-- [Available Scripts](#available-scripts)
+- [API Endpoints Reference](#api-endpoints-reference)
 - [Physiological Models](#physiological-models)
 
 ---
 
 ## Overview
 
-Endurance athletes frequently struggle with balancing training stress and recovery, often falling into overtraining or suffering acute load spikes that cause injury. 
-
-**Endurance AI** bridges physiological data science with autonomous AI coaching:
-1. Ingests raw GPS & second-by-second heart rate telemetry streams from **Strava**.
-2. Processes cardiac impulse response using **Banister's TRIMP** formula.
-3. Tracks 7-day Acute Load vs. 28-day Chronic Load to compute **Gabbett's Acute:Chronic Workload Ratio (ACWR)**.
-4. Generates structured, scientifically grounded daily workouts and recovery advisories via **Google Gemini 2.5 Flash**.
+Endurance athletes walk a fine line between fitness gains and overtraining injuries. **Endurance AI** automates physiological analysis and recovery prescription:
+- **Inbound Webhooks:** Strava activity events are accepted and queued into Redis in milliseconds.
+- **Vectorized Telemetry Processing:** High-frequency heart rate and time streams are processed using NumPy vectorization for Banister's TRIMP.
+- **Acute:Chronic Workload Ratio (ACWR):** 7-day fatigue vs. 28-day fitness rolling averages isolate overreaching and injury risk zones.
+- **Google Gemini 2.5 Flash:** Generates structured workout recommendations with detailed sports-science rationales.
 
 ---
 
-## System Architecture
+## Two-Tier System Architecture
 
-The project runs on a modern **Serverless BaaS Architecture**:
-
+```text
++-------------------------------------------------------------------------------+
+|                               Browser / Client                                |
++---------------------------------------+---------------------------------------+
+                                        |
+                   +--------------------+--------------------+
+                   |                                         |
+                   v                                         v
++------------------------------------+    +------------------------------------+
+|         Frontend Service           |    |          Backend Service           |
+|            (frontend/)             |    |             (backend/)             |
+|   Next.js 15 App Router (Port 3000)|    |       FastAPI (Port 8000)          |
+|   - Athlete Analytics Dashboard    |    |   - Strava Webhook Verification    |
+|   - Recharts Visualizations        |    |   - NumPy TRIMP & ACWR Engine      |
+|   - Supabase Auth Integration      |    |   - Google Gemini 2.5 Flash Coach  |
++------------------+-----------------+    +------------------+-----------------+
+                   |                                         |
+                   | (Bearer JWT)                            | (Pushes / Pops)
+                   +--------------------->                   v
+                                          +------------------------------------+
+                                          |            Redis Queue             |
+                                          |            (Port 6379)             |
+                                          |     Asynchronous Activity Worker   |
+                                          +------------------+-----------------+
+                                                             |
+                                                             | (Persists Records)
+                                                             v
++-------------------------------------------------------------------------------+
+|                            Supabase Cloud (PostgreSQL)                        |
+|                  RLS Policies, Athlete Profiles, Activities, Loads            |
++-------------------------------------------------------------------------------+
 ```
-+-----------------------------------------------------------------------------+
-|                               Client Layer                                  |
-|         Next.js 15 App Router (React 19, Tailwind CSS v4, Recharts)         |
-+------------------------------------+----------------------------------------+
-                                     |
-                +--------------------+--------------------+
-                |                                         |
-                v                                         v
-+-------------------------------+       +------------------------------------+
-|     Next.js Server Actions    |       |       Next.js Route Handlers       |
-|      (Workout Generation)     |       |    (/api/webhooks, /api/jobs)      |
-+---------------+---------------+       +-----------------+------------------+
-                |                                         |
-                | (Generates Object)                      | (Dispatches Task)
-                v                                         v
-+-------------------------------+       +------------------------------------+
-|  Google Gemini 2.5 Flash      |       |          Upstash QStash            |
-|       (Vercel AI SDK)         |       |      (Serverless Task Queue)       |
-+---------------+---------------+       +-----------------+------------------+
-                |                                         |
-                | (Stores Recommendations)                | (Invokes Worker)
-                v                                         v
-+-----------------------------------------------------------------------------+
-|                             Supabase Cloud                                  |
-|         PostgreSQL Database + Row-Level Security (RLS) + Auth               |
-+-----------------------------------------------------------------------------+
+
+---
+
+## Directory Structure
+
+```text
+.
+├── docker-compose.yml          # Orchestrates frontend, backend, and redis
+├── .env.example                # Unified environment variable template
+├── README.md                   # System documentation and setup guide
+├── frontend/
+│   ├── app/
+│   │   ├── layout.tsx          # Root Next.js layout and typography
+│   │   ├── page.tsx            # Marketing and product landing page
+│   │   ├── (auth)/login/       # Athlete sign-in with Supabase Auth
+│   │   └── dashboard/          # Real-time TRIMP & ACWR load matrix
+│   ├── lib/
+│   │   ├── api.ts              # Type-safe client for FastAPI backend
+│   │   └── supabase/           # Supabase client instances (SSR, Admin)
+│   ├── Dockerfile              # Multi-stage standalone Next.js container
+│   ├── package.json            # Node.js dependencies
+│   └── tsconfig.json           # TypeScript configuration
+├── backend/
+│   ├── app/
+│   │   ├── __init__.py         # Package entrypoint
+│   │   ├── main.py             # FastAPI app, routes, and lifespan worker
+│   │   ├── config.py           # Pydantic Settings environment configuration
+│   │   ├── calculations.py     # NumPy-vectorized TRIMP, HR zones, and ACWR
+│   │   ├── strava.py           # Strava OAuth token rotation & stream client
+│   │   ├── worker.py           # Redis activity queue consumer & pipeline
+│   │   └── coach.py            # Google Gemini 2.5 Flash recovery synthesis
+│   ├── tests/
+│   │   ├── test_calculations.py# Unit tests for physiological modeling
+│   │   └── test_api.py         # Unit tests for FastAPI endpoints
+│   ├── Dockerfile              # Python 3.12-slim production container
+│   └── requirements.txt        # Python backend dependencies
+└── supabase/
+    └── schema.sql              # PostgreSQL tables, indexes, and RLS policies
 ```
 
 ---
 
 ## Key Features
 
-- **Automated Strava Sync:** OAuth token lifecycle management with automatic refresh and asynchronous webhook activity ingestion.
-- **Heart Rate Stream Telemetry:** Extracts second-by-second HR stream data and categorizes training time into a standard 5-zone HR distribution.
-- **Banister TRIMP Computation:** Non-linear exponential heart rate weighting factoring in resting HR, max HR, and gender coefficients.
-- **ACWR Tracking:** Continuous 28-day rolling window calculating acute fatigue vs. chronic fitness to pinpoint sweet spot training (0.8–1.3) vs. danger zones (>1.5).
-- **AI Recovery Engine:** Structured JSON workout generation using Gemini 2.5 Flash, providing target zones, readiness scores, and training rationales.
-- **Interactive Dashboard:** Dynamic charts built with Recharts, interactive zone distributions, and simulated workout ingestion.
+- **Decoupled Two-Tier Design:** Clear separation of concerns between UI presentation and heavy scientific/AI computing.
+- **NumPy Vectorization:** Replaces iterative telemetry loops with vectorized array calculations, dramatically accelerating TRIMP scoring.
+- **Asynchronous Task Queue:** Built-in Redis queue and consumer pipeline ensures webhook ingestion satisfies Strava's strict 2-second timeout.
+- **Google Gemini 2.5 Flash:** Employs the modern `google-genai` SDK with strict Pydantic schemas for structured workout and recovery protocols.
+- **Resilient Fallback Modes:** Deterministic offline heuristics allow testing and evaluation even when external API keys are omitted.
 
 ---
 
 ## Tech Stack
 
-| Layer | Technology |
+| Service | Technologies |
 | :--- | :--- |
-| **Framework** | [Next.js 15 (App Router)](https://nextjs.org/) + React 19 |
-| **Language** | TypeScript |
-| **Styling** | [Tailwind CSS v4](https://tailwindcss.com/) + Lucide Icons |
-| **Data Visualization** | [Recharts](https://recharts.org/) |
-| **Database & Auth** | [Supabase](https://supabase.com/) (PostgreSQL + RLS) |
-| **Message Queue** | [Upstash QStash](https://upstash.com/docs/qstash/overall/getstarted) |
-| **AI / LLM** | [Google Gemini 2.5 Flash](https://ai.google.dev/) via [Vercel AI SDK](https://sdk.vercel.ai/) |
-| **Activity Source** | [Strava V3 API](https://developers.strava.com/) |
+| **Frontend** | Next.js 15 (App Router), React 19, TypeScript, Tailwind CSS, Recharts |
+| **Backend** | Python 3.12, FastAPI, Uvicorn, Pydantic, NumPy, HTTPX, PyJWT |
+| **Queue** | Redis 7 Alpine (`activity_queue`) |
+| **Database & Auth** | Supabase (PostgreSQL with Row Level Security) |
+| **AI / LLM** | Google Gemini 2.5 Flash via `google-genai` |
+| **Activity Source** | Strava V3 API |
 
 ---
 
-## Directory Structure
+## Quickstart with Docker Compose
 
-```
-├── app/
-│   ├── (auth)/login/             # Supabase authentication UI
-│   ├── actions/                  # Server Actions (e.g., recommend.ts for AI generation)
-│   ├── api/
-│   │   ├── auth/callback/        # OAuth redirect handler
-│   │   ├── jobs/                 # QStash asynchronous queue consumers
-│   │   └── webhooks/strava/      # Strava subscription validation & event receiver
-│   ├── dashboard/                # Interactive analytics & recovery dashboard
-│   ├── globals.css               # Design system tokens and styles
-│   ├── layout.tsx                # Root HTML layout & fonts
-│   └── page.tsx                  # Marketing / product landing page
-├── lib/
-│   ├── calculations.ts           # TRIMP, 5-zone HR distribution, and ACWR formulas
-│   ├── qstash.ts                 # QStash client & webhook signature verification
-│   ├── strava.ts                 # Strava API endpoints & OAuth token rotation
-│   ├── supabase/                 # Supabase client instances (SSR, Admin, Browser)
-│   └── utils.ts                  # ClassName merging helpers (clsx & tailwind-merge)
-├── supabase/
-│   └── schema.sql                # PostgreSQL tables, indexes, and RLS policies
-├── .env.local.example            # Environment configuration template
-└── package.json                  # Dependencies and build scripts
-```
-
----
-
-## Prerequisites
-
-Before running the application, ensure you have:
-- **Node.js**: Version 18.18 or higher (Node 20+ recommended)
-- **npm**, **pnpm**, or **yarn**
-- Accounts for external services (all have free tiers):
-  - [Supabase](https://supabase.com/)
-  - [Google AI Studio](https://aistudio.google.com/) (Gemini API Key)
-  - [Upstash](https://upstash.com/) (QStash token & signing keys)
-  - [Strava Developers](https://developers.strava.com/) (API Application)
-
----
-
-## Quickstart Guide
-
-### 1. Clone and Install Dependencies
+The fastest way to launch the complete system:
 
 ```bash
+# 1. Clone repository
 git clone https://github.com/GaryQuah/SC3040_AdvancedSoftware.git
 cd SC3040_AdvancedSoftware
+
+# 2. Configure environment variables
+cp .env.example .env
+
+# 3. Build and run all services
+docker compose up --build
+```
+
+Once started:
+- **Frontend:** [http://localhost:3000](http://localhost:3000) (Dashboard at `/dashboard`)
+- **Backend API & Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Backend Healthcheck:** [http://localhost:8000/health](http://localhost:8000/health)
+
+---
+
+## Manual Local Development
+
+### 1. Backend Setup (FastAPI)
+
+> **Note:** Redis is **optional** for local development. If Redis is not detected, the backend automatically operates in standalone in-memory mode.
+
+```bash
+cd backend
+
+# Start development server with hot reloading
+uvicorn app.main:app --reload --port 8000
+```
+
+### 2. Frontend Setup (Next.js 15)
+
+```bash
+cd frontend
+
+# Install Node dependencies
 npm install
-```
 
-### 2. Configure Environment Variables
-
-Copy the example environment file and fill in your service credentials:
-
-```bash
-cp .env.local.example .env.local
-```
-
-Populate the following keys in `.env.local`:
-
-```env
-# Application Host URL
-NEXT_PUBLIC_APP_URL=http://localhost:3000
-
-# Supabase (Auth & Database)
-NEXT_PUBLIC_SUPABASE_URL=https://<your-project-ref>.supabase.co
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<your-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
-
-# Strava API (OAuth & Webhooks)
-STRAVA_CLIENT_ID=<your-strava-client-id>
-STRAVA_CLIENT_SECRET=<your-strava-client-secret>
-STRAVA_VERIFY_TOKEN=<your-custom-webhook-verify-token>
-
-# Upstash QStash (Async Queue)
-QSTASH_URL=https://qstash.upstash.io/v2
-QSTASH_TOKEN=<your-qstash-token>
-QSTASH_CURRENT_SIGNING_KEY=<your-current-signing-key>
-QSTASH_NEXT_SIGNING_KEY=<your-next-signing-key>
-
-# Google Generative AI (Gemini 2.5 Flash)
-GOOGLE_GENERATIVE_AI_API_KEY=<your-gemini-api-key>
-```
-
-> **Note:** If `GOOGLE_GENERATIVE_AI_API_KEY` is not provided, the recommendation engine falls back gracefully to a deterministic mock recommendation for local evaluation.
-
-### 3. Database Setup (Supabase)
-
-1. Open your **Supabase Dashboard** and navigate to the **SQL Editor**.
-2. Copy the contents of [`supabase/schema.sql`](file:///c:/Users/User/Desktop/SC3040/SC3040_AdvancedSoftware/supabase/schema.sql).
-3. Run the script. This creates:
-   - `athlete_profiles`: Stores athlete physiological parameters (rest HR, max HR) & Strava tokens.
-   - `activities`: Persists workout telemetry, raw stream summaries, and TRIMP scores.
-   - `daily_training_loads`: Stores daily aggregated TRIMP, acute load, chronic load, and ACWR.
-   - `ai_recommendations`: Stores daily Gemini AI workout recommendations and rationale.
-   - Row-Level Security (RLS) policies and performance indexes.
-
-### 4. Start the Local Server
-
-```bash
+# Start Next.js development server
 npm run dev
 ```
 
-Visit [http://localhost:3000](http://localhost:3000) to view the landing page, or jump straight to [http://localhost:3000/dashboard](http://localhost:3000/dashboard) to view the analytics dashboard.
+### 3. Database Setup (Supabase)
+
+1. Open your **Supabase Dashboard** and go to the **SQL Editor**.
+2. Run the script in [`supabase/schema.sql`](file:///c:/Users/User/Desktop/SC3040/SC3040_AdvancedSoftware/supabase/schema.sql).
+3. The schema sets up:
+   - `athlete_profiles`: Physiological baselines (resting HR, max HR) and Strava tokens.
+   - `activities`: Workout telemetry, TRIMP scores, and 5-zone HR distributions.
+   - `daily_training_loads`: Daily TRIMP aggregates, Acute (7d), Chronic (28d), and ACWR.
+   - `ai_recommendations`: Daily Gemini 2.5 Flash coaching plans.
 
 ---
 
-## Webhooks & Asynchronous Processing
+## API Endpoints Reference
 
-To test inbound webhooks (Strava & QStash) on your local machine:
+### Health & Probes
+- `GET /health`: Healthcheck probe.
 
-1. Use a tunneling tool like **ngrok** or **Cloudflare Tunnel** to expose port 3000:
-   ```bash
-   ngrok http 3000
-   ```
-2. Update `NEXT_PUBLIC_APP_URL` in `.env.local` to match your tunnel URL.
-3. Configure your Strava Webhook subscription callback URL to:
-   `https://<your-tunnel-url>/api/webhooks/strava`
+### Strava Webhooks & Sync
+- `GET /api/v1/webhooks/strava`: Verification handshake (`hub.challenge`).
+- `POST /api/v1/webhooks/strava`: Asynchronous activity event receiver.
+- `POST /api/v1/activities/process`: Synchronous / simulated activity trigger.
 
-When a new activity is posted:
-1. Strava sends an event to `/api/webhooks/strava`.
-2. The webhook handler publishes a message to **Upstash QStash** and immediately returns `HTTP 200`.
-3. QStash invokes `/api/jobs/process-activity` in the background with signature verification, pulling the HR streams and updating the training loads.
-
----
-
-## Available Scripts
-
-| Command | Purpose |
-| :--- | :--- |
-| `npm run dev` | Starts the Next.js local development server with Turbopack/Fast Refresh. |
-| `npm run build` | Compiles the production build. |
-| `npm run start` | Runs the compiled production build locally. |
-| `npm run lint` | Runs Next.js ESLint checks. |
-| `npm run typecheck` | Validates TypeScript types across the project (`tsc --noEmit`). |
+### Analytics & AI Coaching
+- `GET /api/v1/analytics/acwr`: Fetches 28-day ACWR history and acute/chronic loads.
+- `POST /api/v1/recommendations/generate`: Synthesizes daily workout with Gemini 2.5 Flash.
 
 ---
 
 ## Physiological Models
 
 ### 1. Banister TRIMP (Training Impulse)
-TRIMP quantifies training load by weighting exercise duration against heart rate reserve:
+TRIMP weights duration ($D$, in minutes) against fractional heart rate reserve elevation ($\Delta\text{HR}$):
 
 $$\text{TRIMP} = D \times \Delta\text{HR} \times y$$
 
 Where:
-- $D$ is exercise duration in minutes.
-- $\Delta\text{HR} = \frac{\text{HR}_{\text{exercise}} - \text{HR}_{\text{rest}}}{\text{HR}_{\text{max}} - \text{HR}_{\text{rest}}}$.
+- $\Delta\text{HR} = \frac{\text{HR} - \text{HR}_{\text{rest}}}{\text{HR}_{\text{max}} - \text{HR}_{\text{rest}}}$
 - $y = 0.64 \times e^{1.92 \times \Delta\text{HR}}$ for males ($0.86 \times e^{1.67 \times \Delta\text{HR}}$ for females).
 
-Calculated in [`lib/calculations.ts`](file:///c:/Users/User/Desktop/SC3040/SC3040_AdvancedSoftware/lib/calculations.ts).
+Implemented with NumPy vectorization in [`backend/app/calculations.py`](file:///c:/Users/User/Desktop/SC3040/SC3040_AdvancedSoftware/backend/app/calculations.py).
 
 ### 2. Acute:Chronic Workload Ratio (ACWR)
-Tracks the relationship between the workload completed in the past 7 days (Acute / Fatigue) and the average workload completed over the past 28 days (Chronic / Fitness):
+$$\text{ACWR} = \frac{\text{Acute Load (7-day average)}}{\text{Chronic Load (28-day average)}}$$
 
-$$\text{ACWR} = \frac{\text{Acute Load (7-day rolling average)}}{\text{Chronic Load (28-day rolling average)}}$$
-
-- **< 0.80:** Undertraining / Fitness loss
-- **0.80 – 1.30:** "Sweet Spot" (Injury risk minimized, optimal fitness progression)
-- **1.30 – 1.50:** Overreaching / Elevated fatigue
-- **> 1.50:** "Danger Zone" (Significantly increased relative risk of injury)
+- **< 0.80:** Undertraining
+- **0.80 – 1.30:** "Sweet Spot" (Optimal adaptation, minimized injury risk)
+- **1.30 – 1.50:** Overreaching
+- **> 1.50:** "Danger Zone" (Spike in relative injury likelihood)
