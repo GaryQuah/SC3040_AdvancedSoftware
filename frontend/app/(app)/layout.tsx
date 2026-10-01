@@ -44,7 +44,7 @@ export default function DashboardLayout({
 
             {/* Profile / Settings Button */}
             <Link 
-              href="/dashboard/settings"
+              href="/settings"
               className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/80 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-800 hover:text-white hover:border-slate-700 group"
             >
               <div className="bg-slate-800 p-1 rounded-md group-hover:bg-slate-700 transition-colors">

@@ -1,7 +1,7 @@
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from supabase import create_client, Client
-from ..core.config import get_settings
+from app.commons.config import get_settings
 
 security = HTTPBearer()
 settings = get_settings()

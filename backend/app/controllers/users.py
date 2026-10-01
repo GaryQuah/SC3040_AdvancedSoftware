@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Any
-from ....models.users import UserResponse, UserUpdate
-from ....api.deps import get_current_user_id, get_supabase_admin
+from app.models.users import UserResponse, UserUpdate
+from app.commons.auth.deps import get_current_user_id, get_supabase_admin
 
 # The prefix "/users" can be handled here or in main.py. 
 # We explicitly define the routes here based on your previous setup.

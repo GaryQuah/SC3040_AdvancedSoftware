@@ -2,7 +2,7 @@ import time
 from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
-from .config import get_settings
+from ..commons.config import get_settings
 
 
 class StravaTokenResponse(BaseModel):
