@@ -1,0 +1,52 @@
+import logging
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+# --- New Architecture Imports ---
+from .commons.config import get_settings
+from .controllers.users import router as users_router
+from .controllers.strava import router as strava_router
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("fitra.backend")
+
+settings = get_settings()
+
+# Notice lifespan=lifespan has been removed here
+app = FastAPI(
+    title=settings.APP_NAME,
+    version="0.1.0",
+    description="Scientific Endurance Training Load & AI Recovery Backend",
+)
+
+# CORS setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.FRONTEND_URL, "http://localhost:3000", "http://127.0.0.1:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================================
+# API Routers (The Controller Layer)
+# ============================================================================
+app.include_router(users_router)
+app.include_router(strava_router)
+
+@app.get("/health", tags=["Health"])
+async def health_check():
+    from .commons.auth.deps import get_supabase_admin
+    try:
+        supabase = get_supabase_admin()
+        supabase.table("users").select("*").limit(1).execute()
+        db_status = "connected"
+    except Exception as e:
+        db_status = f"connection failed: {str(e)}"
+
+    return {
+        "status": "healthy",
+        "service": "fitra-backend",
+        "database": db_status,
+        "environment": settings.ENVIRONMENT,
+    }
