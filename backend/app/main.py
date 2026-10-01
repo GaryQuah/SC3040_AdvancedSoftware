@@ -2,14 +2,28 @@ import asyncio
 from contextlib import asynccontextmanager
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-import jwt
 from pydantic import BaseModel
+
+# --- New Architecture Imports ---
+from .core.config import get_settings
+from .api.deps import get_current_user_id, get_supabase_admin
+from .api.v1.endpoints import users
+
+# --- Domain Logic Imports ---
 from .coach import RecommendationSchema, synthesize_recommendation
-from .config import get_settings
-from .worker import enqueue_activity_job, get_supabase_admin, process_activity_pipeline, run_worker_loop
+from .worker import enqueue_activity_job, process_activity_pipeline, run_worker_loop
+from .strava import (
+    exchange_strava_token,
+    refresh_strava_token,
+    fetch_strava_athlete,
+    fetch_strava_athlete_stats,
+    fetch_strava_activities,
+    fetch_strava_activity,
+    fetch_strava_activity_streams,
+    fetch_strava_gear
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("endurance.backend")
@@ -38,6 +52,7 @@ async def lifespan(app: FastAPI):
 
 
 settings = get_settings()
+
 app = FastAPI(
     title=settings.APP_NAME,
     version="0.1.0",
@@ -54,31 +69,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ================
+# API Routers 
+# ================
+app.include_router(users.router, prefix="/api/v1")
 
-def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """
-    Extracts user_id from Supabase JWT if present; falls back to default demo athlete ID.
-    """
-    default_user = "00000000-0000-0000-0000-000000000001"
+
+def get_strava_token(authorization: Optional[str] = Header(None)) -> str:
+    """Extracts the forwarded Strava Access Token provided by the Next.js frontend."""
     if not authorization or not authorization.startswith("Bearer "):
-        return default_user
-
-    token = authorization.replace("Bearer ", "").strip()
-    try:
-        # Decode without verification if no secret is configured, or verify if configured
-        if settings.SUPABASE_JWT_SECRET:
-            payload = jwt.decode(
-                token,
-                settings.SUPABASE_JWT_SECRET,
-                algorithms=["HS256"],
-                audience="authenticated",
-            )
-        else:
-            payload = jwt.decode(token, options={"verify_signature": False})
-        return payload.get("sub", default_user)
-    except Exception as e:
-        logger.debug(f"JWT parse notice: {e}")
-        return default_user
+        raise HTTPException(status_code=401, detail="Missing or invalid Bearer token")
+    return authorization.split(" ")[1]
 
 
 class RecommendationRequest(BaseModel):
@@ -97,36 +98,66 @@ async def health_check():
         "service": "endurance-ai-backend",
         "environment": settings.ENVIRONMENT,
     }
-
-
+    
 # ============================================================================
-# Strava Webhooks
+# Strava REST Ingestion & Webhooks
 # ============================================================================
 
-@app.get("/api/v1/webhooks/strava", tags=["Strava"])
+strava_router = APIRouter(prefix="/api/v1/strava", tags=["Strava Direct API"])
+
+@strava_router.post("/exchange")
+async def exchange_token(code: str):
+    return await exchange_strava_token(code)
+
+@strava_router.post("/refresh")
+async def refresh_token(refresh_token: str):
+    return await refresh_strava_token(refresh_token)
+
+@strava_router.get("/athlete")
+async def get_athlete(authorization: Optional[str] = Header(None)):
+    return await fetch_strava_athlete(get_strava_token(authorization))
+
+@strava_router.get("/athletes/{athlete_id}/stats")
+async def get_stats(athlete_id: int, authorization: Optional[str] = Header(None)):
+    return await fetch_strava_athlete_stats(get_strava_token(authorization), athlete_id)
+
+@strava_router.get("/activities")
+async def get_activities(
+    page: int = Query(1, ge=1), 
+    per_page: int = Query(10, ge=1, le=50), 
+    authorization: Optional[str] = Header(None)
+):
+    return await fetch_strava_activities(get_strava_token(authorization), page, per_page)
+
+@strava_router.get("/activities/{activity_id}")
+async def get_activity(activity_id: int, authorization: Optional[str] = Header(None)):
+    return await fetch_strava_activity(get_strava_token(authorization), activity_id)
+
+@strava_router.get("/activities/{activity_id}/streams")
+async def get_streams(activity_id: int, authorization: Optional[str] = Header(None)):
+    return await fetch_strava_activity_streams(get_strava_token(authorization), activity_id)
+
+@strava_router.get("/gear/{gear_id}")
+async def get_gear(gear_id: str, authorization: Optional[str] = Header(None)):
+    return await fetch_strava_gear(get_strava_token(authorization), gear_id)
+
+app.include_router(strava_router)
+
+
+@app.get("/api/v1/webhooks/strava", tags=["Strava Webhooks"])
 async def strava_webhook_challenge(
     hub_mode: str = Query(..., alias="hub.mode"),
     hub_challenge: str = Query(..., alias="hub.challenge"),
     hub_verify_token: str = Query(..., alias="hub.verify_token"),
 ):
-    """
-    Handles Strava's initial subscription verification handshake.
-    """
     if hub_mode == "subscribe" and hub_verify_token == settings.STRAVA_VERIFY_TOKEN:
         logger.info("Strava subscription challenge verified.")
         return {"hub.challenge": hub_challenge}
 
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Invalid verification token or mode",
-    )
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid verification token or mode")
 
-
-@app.post("/api/v1/webhooks/strava", tags=["Strava"])
+@app.post("/api/v1/webhooks/strava", tags=["Strava Webhooks"])
 async def strava_webhook_event(request: Request):
-    """
-    Ingests inbound Strava webhook events and enqueues them onto Redis queue within 2s.
-    """
     payload = await request.json()
     logger.info(f"Received Strava event: {payload}")
 
@@ -138,7 +169,6 @@ async def strava_webhook_event(request: Request):
     if object_type == "activity" and aspect_type in ("create", "update") and activity_id:
         await enqueue_activity_job(activity_id=activity_id, athlete_id=athlete_id)
 
-    # Return HTTP 200 immediately to satisfy Strava's strict 2000ms response window
     return {"status": "event_received"}
 
 
@@ -149,27 +179,23 @@ async def strava_webhook_event(request: Request):
 @app.post("/api/v1/recommendations/generate", response_model=RecommendationSchema, tags=["Recovery"])
 async def generate_recommendation_endpoint(
     body: RecommendationRequest,
-    user_id: str = Depends(get_current_user_id),
+    user_id: str = Depends(get_current_user_id), # Now uses secure Supabase JWT validation
 ):
-    """
-    Generates a daily AI recovery and workout protocol using Google Gemini 2.5 Flash.
-    """
-    effective_user_id = body.userId or user_id
+    """Generates a daily AI recovery and workout protocol using Google Gemini."""
     supabase = get_supabase_admin()
-
     athlete_profile = None
     recent_loads = []
     recent_activities = []
 
     if supabase:
         try:
-            p_res = supabase.table("athlete_profiles").select("*").eq("user_id", effective_user_id).maybe_single().execute()
+            p_res = supabase.table("users").select("*").eq("user_id", user_id).maybe_single().execute()
             athlete_profile = p_res.data if p_res else None
 
             l_res = (
                 supabase.table("daily_training_loads")
                 .select("date, daily_trimp, acute_load_7d, chronic_load_28d, acwr")
-                .eq("user_id", effective_user_id)
+                .eq("user_id", user_id)
                 .order("date", desc=True)
                 .limit(7)
                 .execute()
@@ -179,7 +205,7 @@ async def generate_recommendation_endpoint(
             a_res = (
                 supabase.table("activities")
                 .select("name, type, start_date, moving_time, distance, average_heartrate, trimp_score")
-                .eq("user_id", effective_user_id)
+                .eq("user_id", user_id)
                 .order("start_date", desc=True)
                 .limit(5)
                 .execute()
@@ -189,19 +215,18 @@ async def generate_recommendation_endpoint(
             logger.warning(f"Error fetching data from Supabase for AI recommendation: {e}")
 
     recommendation = await synthesize_recommendation(
-        user_id=effective_user_id,
+        user_id=user_id,
         athlete_profile=athlete_profile,
         recent_loads=recent_loads,
         recent_activities=recent_activities,
     )
 
-    # Persist recommendation to Supabase if available
     if supabase:
         try:
             supabase.table("ai_recommendations").insert(
                 {
-                    "user_id": effective_user_id,
-                    "date": logging.Formatter().converter(None)[:10] if hasattr(logging, "Formatter") else "2026-09-03",
+                    "user_id": user_id,
+                    "date": logging.Formatter().converter(None)[:10] if hasattr(logging, "Formatter") else "2026-10-01", 
                     "readiness_score": recommendation.readinessScore,
                     "injury_risk_level": recommendation.injuryRiskLevel,
                     "recovery_status": recommendation.recoveryStatus,
@@ -222,11 +247,8 @@ async def generate_recommendation_endpoint(
 
 @app.get("/api/v1/analytics/acwr", tags=["Analytics"])
 async def get_acwr_analytics(
-    user_id: str = Query("00000000-0000-0000-0000-000000000001", alias="userId"),
+    user_id: str = Depends(get_current_user_id), # Secured the analytics endpoint
 ):
-    """
-    Returns rolling 28-day ACWR, acute fatigue, chronic fitness, and current risk status.
-    """
     supabase = get_supabase_admin()
     history = []
 
@@ -256,7 +278,7 @@ async def get_acwr_analytics(
             logger.warning(f"Error fetching ACWR analytics: {e}")
 
     if not history:
-        # Provide representative initial 28-day dataset for evaluation
+        # Fallback dummy data if table is empty
         base_loads = [45, 60, 0, 75, 50, 90, 0, 55, 70, 0, 65, 85, 110, 0, 50, 60, 0, 95, 40, 120, 0, 65, 80, 0, 70, 90, 105, 78]
         from .calculations import calculate_acwr
         for i in range(28):
@@ -264,7 +286,7 @@ async def get_acwr_analytics(
             res = calculate_acwr(window)
             history.append({
                 "day": f"Day {i + 1}",
-                "date": f"08-{i+5:02d}" if i < 27 else "Today",
+                "date": f"09-{i+5:02d}" if i < 27 else "Today",
                 "trimp": base_loads[i],
                 "acute": res.acute_load_7d,
                 "chronic": res.chronic_load_28d,
@@ -292,9 +314,6 @@ async def get_acwr_analytics(
 
 @app.post("/api/v1/activities/process", tags=["Activities"])
 async def trigger_process_activity(body: ActivityProcessRequest):
-    """
-    Direct synchronous activity ingestion trigger for testing and simulation.
-    """
     result = await process_activity_pipeline(
         activity_id=body.activityId,
         athlete_id=body.athleteId,
