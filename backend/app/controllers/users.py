@@ -32,7 +32,7 @@ async def get_my_profile(
         "fitnessGoal": data.get("fitness_goal"),
         "userId": data["user_id"],
         "createdAt": data["created_at"],
-        "isStravaConnected": bool(data.get("strava_access_token")) 
+        "isStravaConnected": bool(data.get("strava_access_token"))
     }
 
 @router.put("/users/me", response_model=UserResponse)

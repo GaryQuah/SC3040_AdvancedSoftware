@@ -29,25 +29,24 @@ export default async function SettingsPage({
     redirect("/login");
   }
 
-  const profileRes = await fetch("http://localhost:8000/users/me", {
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+  const profileRes = await fetch(`${backendUrl}/users/me`, {
     headers: {
       Authorization: `Bearer ${session.access_token}`,
     },
-    next: { tags: ['user-profile'] } 
+    next: { tags: ['user-profile'] }
   });
   
   const userProfile = profileRes.ok ? await profileRes.json() : null;
-  
+
   const isStravaConnected = !!userProfile?.isStravaConnected;
 
   const clientId = process.env.NEXT_PUBLIC_STRAVA_CLIENT_ID; 
   const redirectUri = process.env.NEXT_PUBLIC_STRAVA_REDIRECT_URI;
 
-  if (!clientId || !redirectUri) {
-    throw new Error("Missing Strava environment variables");
-  }
-
-  const authUrl = `https://www.strava.com/oauth/authorize?client_id=${clientId}&response_type=code&redirect_uri=${redirectUri}&approval_prompt=force&scope=activity:read_all,profile:read_all`;
+  const authUrl = clientId && redirectUri
+    ? `https://www.strava.com/oauth/authorize?${new URLSearchParams({ client_id: clientId, response_type: "code", redirect_uri: redirectUri, approval_prompt: "force", scope: "activity:read_all,profile:read_all" })}`
+    : null;
 
   return (
     <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -63,7 +62,7 @@ export default async function SettingsPage({
         {/* Sidebar Navigation */}
         <div className="space-y-1">
           <Link 
-            href="/settings?tab=profile"
+            href="/dashboard/settings?tab=profile"
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg font-medium text-sm transition-colors ${
               activeTab === "profile" 
                 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
@@ -74,7 +73,7 @@ export default async function SettingsPage({
             Profile & Metrics
           </Link>
           <Link 
-            href="/settings?tab=integrations"
+            href="/dashboard/settings?tab=integrations"
             className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg font-medium text-sm transition-colors ${
               activeTab === "integrations" 
                 ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" 
@@ -148,13 +147,13 @@ export default async function SettingsPage({
                     <p className="text-sm text-slate-400 max-w-sm">
                       Connect your account to enable TRIMP tracking, ACWR modeling, and AI coach analysis.
                     </p>
-                    <Link
+                    {authUrl ? <Link
                       href={authUrl}
                       className="flex items-center gap-2 rounded-lg bg-[#FC4C02] px-5 py-2.5 text-sm font-semibold text-white shadow-lg shadow-[#FC4C02]/20 transition hover:bg-[#E34402]"
                     >
                       Connect Strava
                       <ArrowRight className="h-4 w-4" />
-                    </Link>
+                    </Link> : <p className="text-sm text-slate-400">Strava connection is not configured yet.</p>}
                   </div>
                 )}
               </div>
