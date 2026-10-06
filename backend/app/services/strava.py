@@ -25,6 +25,7 @@ class StravaActivity(BaseModel):
     average_heartrate: Optional[float] = None
     max_heartrate: Optional[float] = None
     average_speed: Optional[float] = None
+    calories: Optional[float] = None
     gear_id: Optional[str] = None
 
 
