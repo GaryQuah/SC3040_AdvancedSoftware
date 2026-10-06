@@ -70,7 +70,8 @@ async def test_token_lookup_and_refresh(monkeypatch, expired):
     )
     monkeypatch.setattr(strava, "refresh_strava_token", refresh)
     result = await strava.check_valid_strava_token(USER_ID)
-    query.select.assert_called_once_with(
+    assert query.select.call_count == 1
+    assert ",".join(query.select.call_args.args) == (
         "strava_access_token,strava_refresh_token,strava_expires_at"
     )
     query.select.return_value.eq.assert_called_once_with("user_id", USER_ID)

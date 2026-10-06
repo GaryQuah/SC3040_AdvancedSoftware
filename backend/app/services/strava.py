@@ -108,7 +108,11 @@ async def check_valid_strava_token(user_id: str) -> str:
     # Fetch current tokens from database
     res = (
         supabase.table("users")
-        .select("strava_access_token,strava_refresh_token,strava_expires_at")
+        .select(
+            "strava_access_token",
+            "strava_refresh_token",
+            "strava_expires_at"
+        )
         .eq("user_id", user_id)
         .maybe_single()
         .execute()
