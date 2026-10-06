@@ -3,6 +3,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidateTag } from "next/cache";
 
+const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
+
 export async function updateProfileMetrics(formData: {
   age?: number;
   weight?: number;
@@ -20,7 +22,7 @@ export async function updateProfileMetrics(formData: {
     throw new Error("Unauthorized");
   }
 
-  const res = await fetch("http://localhost:8000/users/me", {
+  const res = await fetch(`${backendUrl}/users/me`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -50,7 +52,7 @@ export async function disconnectStrava() {
     throw new Error("Unauthorized");
   }
 
-  const res = await fetch("http://localhost:8000/strava/disconnect", {
+  const res = await fetch(`${backendUrl}/strava/disconnect`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${session.access_token}`,

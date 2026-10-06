@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
 from ..commons.config import get_settings
+from ..commons.auth.deps import get_supabase_admin
 from fastapi import HTTPException, status
 
 
@@ -103,26 +104,22 @@ async def refresh_strava_token(refresh_token: str) -> StravaTokenResponse:
 
 async def check_valid_strava_token(user_id: str) -> str:
     supabase = get_supabase_admin()
-    
+
     # Fetch current tokens from database
     res = (
         supabase.table("users")
-        .select(
-            "strava_access_token", 
-            "strava_refresh_token", 
-            "strava_expires_at"
-        )
+        .select("strava_access_token,strava_refresh_token,strava_expires_at")
         .eq("user_id", user_id)
         .maybe_single()
         .execute()
     )
-    
+
     if not res.data or not res.data.get("strava_access_token"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Strava account not connected",
         )
-        
+
     access_token = res.data["strava_access_token"]
     refresh_token = res.data["strava_refresh_token"]
     expires_at = res.data.get("strava_expires_at") or 0
@@ -132,14 +129,14 @@ async def check_valid_strava_token(user_id: str) -> str:
     if current_time >= (expires_at - 300):
         # Call Strava to refresh
         new_tokens = await refresh_strava_token(refresh_token)
-        
+
         # Save refreshed tokens back to Supabase
         supabase.table("users").update({
             "strava_access_token": new_tokens.access_token,
             "strava_refresh_token": new_tokens.refresh_token,
             "strava_expires_at": new_tokens.expires_at,
         }).eq("user_id", user_id).execute()
-        
+
         return new_tokens.access_token
 
     return access_token

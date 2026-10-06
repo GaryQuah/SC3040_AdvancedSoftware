@@ -36,7 +36,7 @@ To switch to Supabase later, stop the demo backend, set `NEXT_PUBLIC_NUTRITION_D
 
 Local validation:
 
-Verified: 38 backend nutrition/demo tests, 5 frontend calculation/configuration tests, and the browser flow against the real SQLite backend passed. Demo backend lint and formatting passed from the `backend/` working directory. Existing Settings and check-in route TypeScript errors still block the project-wide typecheck.
+Verified: 38 backend nutrition/demo tests, 5 frontend calculation/configuration tests, and the browser flow against the real SQLite backend passed. Demo backend lint and formatting passed from the `backend/` working directory. After integrating main PR #8, the Settings TypeScript errors are resolved; the existing check-in route error still blocks the project-wide typecheck.
 
 ```powershell
 # backend/
@@ -149,7 +149,7 @@ npm run typecheck
 
 The browser test uses local authentication/API fixtures and Chrome, with no live credentials or remote writes. It expects Playwright to be available; `PLAYWRIGHT_MODULE` may point to an existing Playwright installation, and `PLAYWRIGHT_CHANNEL` can select another installed channel. Ruff is a development validation tool and can be installed separately.
 
-At implementation time: 30 nutrition backend tests and 4 frontend calculation tests passed; desktop/mobile browser checks passed, including photo-analysis preview, portion changes, ingredient add/remove, saving, refreshed daily totals, deletion and sign-in redirects. Backend nutrition Ruff lint and formatting checks passed. The backend test run reported three deprecation warnings from existing model configuration and the test-client dependency. Live Gemini accuracy, live Supabase persistence and SQL policy behavior still require your configured project. Existing repository-wide blockers include three Settings TypeScript errors, a missing ESLint dependency/configuration, and the old calculations test importing the removed `app.calculations` module.
+At implementation time: 30 nutrition backend tests and 4 frontend calculation tests passed; desktop/mobile browser checks passed, including photo-analysis preview, portion changes, ingredient add/remove, saving, refreshed daily totals, deletion and sign-in redirects. Backend nutrition Ruff lint and formatting checks passed. The backend test run reported three deprecation warnings from existing model configuration and the test-client dependency. Live Gemini accuracy, live Supabase persistence and SQL policy behavior still require your configured project. After integrating main PR #8, remaining repository-wide blockers include the existing check-in route TypeScript error, a missing ESLint dependency/configuration, and the old calculations test importing the removed `app.calculations` module. The integration regression run passed 85 backend tests, 5 frontend calculation/configuration tests, and browser checks for nutrition, Settings profile loading, integration links and OAuth error redirects.
 
 ## Changed files
 

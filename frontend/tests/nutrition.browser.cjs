@@ -9,15 +9,17 @@ async function main() {
   const user = { id: "00000000-0000-0000-0000-000000000001", aud: "authenticated", role: "authenticated", email: "nutrition-test@example.com", app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString() };
   const auth = http.createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(user));
+    res.end(JSON.stringify(req.url === "/users/me"
+      ? { userId: user.id, email: user.email, age: 33, weight: 70, height: 175, biologicalSex: "MALE", activityLevel: "SEDENTARY", fitnessGoal: "MAINTAIN", isStravaConnected: false }
+      : user));
   });
   await new Promise(resolve => auth.listen(54329, "127.0.0.1", resolve));
   const frontend = path.resolve(__dirname, "..");
   const output = path.join(frontend, ".next", "nutrition-qa");
   fs.mkdirSync(output, { recursive: true });
-  const server = spawn(process.execPath, [require.resolve("next/dist/bin/next"), "dev", "--port", "3107"], {
+  const server = spawn(process.execPath, ["-e", "require('next/dist/server/lib/start-server').startServer({dir:process.cwd(),isDev:true,port:3107,hostname:'127.0.0.1',allowRetry:false})"], {
     cwd: frontend, windowsHide: true,
-    env: { ...process.env, NEXT_PUBLIC_NUTRITION_DEMO_MODE: "false", NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key", NEXT_PUBLIC_BACKEND_URL: "http://127.0.0.1:8000" },
+    env: { ...process.env, NEXT_PUBLIC_NUTRITION_DEMO_MODE: "false", NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key", NEXT_PUBLIC_BACKEND_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_STRAVA_CLIENT_ID: "", NEXT_PUBLIC_STRAVA_REDIRECT_URI: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLog = "";
@@ -92,19 +94,25 @@ async function main() {
     await page.getByRole("button", { name: "Yes, delete" }).click();
     await page.getByText("A fresh plate, a fresh start.").waitFor();
     assert.deepEqual(errors, []);
+    await page.goto("http://localhost:3107/dashboard/settings");
+    await page.getByRole("heading", { name: "Profile & TDEE Engine" }).waitFor();
+    assert.equal(await page.getByRole("spinbutton").first().inputValue(), "33");
+    await page.getByRole("link", { name: "Integrations", exact: true }).click();
+    await page.getByText("Strava connection is not configured yet.").waitFor();
+    assert.ok(page.url().includes("/dashboard/settings?tab=integrations"));
+    await page.goto("http://localhost:3107/api/auth/callback?error=access_denied");
+    assert.ok(page.url().includes("/dashboard/settings?tab=integrations&error=access_denied"));
     await context.clearCookies();
     await page.goto("http://localhost:3107/dashboard/nutrition");
     assert.ok(page.url().endsWith("/login"));
-    console.log("PASS: authenticated desktop/mobile UI, image analysis preview, portion scaling, ingredient add/remove, save, daily refresh, delete, and unauthenticated redirect.");
+    console.log("PASS: nutrition workflow, Settings profile using configured backend, integration links without Strava keys, OAuth error redirect, and unauthenticated redirect.");
   } catch (error) {
     console.error(serverLog.slice(-4000));
     throw error;
   } finally {
     await browser?.close();
-    if (process.platform === "win32") {
-      const kill = spawn("taskkill", ["/pid", String(server.pid), "/t", "/f"], { windowsHide: true });
-      await new Promise(resolve => kill.on("close", resolve));
-    } else server.kill();
+    server.kill();
+    server.stdout.destroy(); server.stderr.destroy(); server.unref();
     auth.close();
     auth.closeAllConnections();
   }

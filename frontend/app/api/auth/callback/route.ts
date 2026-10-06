@@ -6,9 +6,10 @@ export async function GET(request: NextRequest) {
   const code = searchParams.get("code");
   const error = searchParams.get("error");
   const baseUrl = request.nextUrl.origin;
+  const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
   if (error || !code) {
-    return NextResponse.redirect(`${baseUrl}/settings?tab=integrations&error=access_denied`);
+    return NextResponse.redirect(`${baseUrl}/dashboard/settings?tab=integrations&error=access_denied`);
   }
 
   const supabase = await createClient();
@@ -21,7 +22,7 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const response = await fetch("http://localhost:8000/strava/exchange", {
+    const response = await fetch(`${backendUrl}/strava/exchange`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -32,13 +33,13 @@ export async function GET(request: NextRequest) {
 
     if (!response.ok) {
       console.error("Token exchange failed:", await response.text());
-      return NextResponse.redirect(`${baseUrl}/settings?tab=integrations&error=exchange_failed`);
+      return NextResponse.redirect(`${baseUrl}/dashboard/settings?tab=integrations&error=exchange_failed`);
     }
   } catch (err) {
     console.error("Backend connection error:", err);
-    return NextResponse.redirect(`${baseUrl}/settings?tab=integrations&error=server_error`);
+    return NextResponse.redirect(`${baseUrl}/dashboard/settings?tab=integrations&error=server_error`);
   }
 
   // 3. Return user to Settings page
-  return NextResponse.redirect(`${baseUrl}/settings?tab=integrations&connected=true`);
+  return NextResponse.redirect(`${baseUrl}/dashboard/settings?tab=integrations&connected=true`);
 }

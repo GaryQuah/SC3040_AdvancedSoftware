@@ -1,5 +1,4 @@
-from typing import Optional
-from fastapi import APIRouter, Depends, Header, Query, Request, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException, status
 from pydantic import BaseModel
 from ..services import strava as strava_service
 from ..commons.config import get_settings
@@ -50,7 +49,7 @@ async def disconnect_strava(
 ):
     """Clears Strava tokens from the authenticated user's record."""
     supabase = get_supabase_admin()
-    
+
     supabase.table("users").update({
         "strava_access_token": None,
         "strava_refresh_token": None,
@@ -59,15 +58,9 @@ async def disconnect_strava(
 
     return {"message": "Strava disconnected successfully"}
 
-def get_strava_token(authorization: Optional[str] = Header(None)) -> str:
-    """Extracts the forwarded Strava Access Token provided by the Next.js frontend."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Bearer token")
-    return authorization.split(" ")[1]
-
 @router.get("/athlete")
-async def get_athlete(authorization: Optional[str] = Header(None)):
-    token = await check_valid_strava_token(user_id)
+async def get_athlete(user_id: str = Depends(get_current_user_id)):
+    token = await strava_service.check_valid_strava_token(user_id)
     return await strava_service.fetch_strava_athlete(token)
 
 @router.get("/activities")
@@ -76,5 +69,5 @@ async def get_activities(
     per_page: int = Query(10, ge=1, le=50),
     user_id: str = Depends(get_current_user_id),
 ):
-    token = await check_valid_strava_token(user_id)
+    token = await strava_service.check_valid_strava_token(user_id)
     return await strava_service.fetch_strava_activities(token, page, per_page)
