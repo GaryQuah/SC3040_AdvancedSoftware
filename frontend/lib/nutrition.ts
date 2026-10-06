@@ -1,8 +1,5 @@
 import { createClient } from "@/lib/supabase/client";
 
-export const nutritionDemoMode = process.env.NODE_ENV === "development"
-  && process.env.NEXT_PUBLIC_NUTRITION_DEMO_MODE === "true";
-
 export interface FoodItem {
   name: string;
   estimated_weight_g: number;
@@ -21,22 +18,34 @@ export interface MealEstimate {
 
 export const mealTypes = ["breakfast", "lunch", "dinner", "snack"] as const;
 export type MealType = typeof mealTypes[number];
-export interface MealRecord extends MealEstimate {
+export interface LoggedFoodItem {
+  name: string;
+  estimated_weight_g: number | null;
+  calories: number | null;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
+}
+export interface MealRecord {
   id: string;
-  meal_type: MealType;
+  meal_name: string;
+  meal_type: MealType | null;
   logged_at: string;
-  total_calories: number;
-  protein_g: number;
-  carbs_g: number;
-  fat_g: number;
+  confidence_score: number | null;
+  training_context_note: string;
+  items: LoggedFoodItem[];
+  total_calories: number | null;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
 }
 export interface DailyLog {
   date: string;
   meals: MealRecord[];
-  total_calories: number;
-  protein_g: number;
-  carbs_g: number;
-  fat_g: number;
+  total_calories: number | null;
+  protein_g: number | null;
+  carbs_g: number | null;
+  fat_g: number | null;
   bmr: number | null;
   active_calories: number | null;
   net_energy: number | null;
@@ -59,11 +68,9 @@ const url = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
 
 async function request(path: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
-  if (!nutritionDemoMode) {
-    const { data: { session }, error } = await createClient().auth.getSession();
-    if (error || !session) throw new Error("Please sign in to use your meal log.");
-    headers.set("Authorization", `Bearer ${session.access_token}`);
-  }
+  const { data: { session }, error } = await createClient().auth.getSession();
+  if (error || !session) throw new Error("Please sign in to use your meal log.");
+  headers.set("Authorization", `Bearer ${session.access_token}`);
   const response = await fetch(`${url}/api/nutrition${path}`, {
     ...options, cache: "no-store", signal: options.signal ?? AbortSignal.timeout(75000),
     headers,

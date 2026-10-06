@@ -37,13 +37,29 @@ test("adding and removing items recalculates totals", () => {
   assert.equal(mealTotals([]).total_calories, 0);
 });
 
-test("demo authentication bypass requires development and an explicit flag", () => {
-  for (const [mode, flag, expected] of [["development", "true", true], ["development", "false", false], ["production", "true", false]]) {
-    const result = {};
-    vm.runInNewContext(compiled.outputText, {
-      exports: result, process: { env: { NODE_ENV: mode, NEXT_PUBLIC_NUTRITION_DEMO_MODE: flag } },
-      require: () => ({ createClient: () => { throw new Error("Unexpected authentication call"); } }),
-    });
-    assert.equal(result.nutritionDemoMode, expected);
-  }
+test("meal requests reject signed-out users before contacting the backend", async () => {
+  const result = {};
+  vm.runInNewContext(compiled.outputText, {
+    exports: result, process, Headers,
+    require: () => ({ createClient: () => ({ auth: {
+      getSession: async () => ({ data: { session: null }, error: null }),
+    } }) }),
+    fetch: () => { throw new Error("Unexpected backend request"); },
+  });
+  await assert.rejects(result.fetchDailyLog("2026-10-07"), /Please sign in/);
+});
+
+test("meal requests send the signed-in user's bearer token", async () => {
+  const result = {};
+  let request;
+  vm.runInNewContext(compiled.outputText, {
+    exports: result, process, Headers, AbortSignal,
+    require: () => ({ createClient: () => ({ auth: {
+      getSession: async () => ({ data: { session: { access_token: "test-token" } }, error: null }),
+    } }) }),
+    fetch: async (url, options) => { request = { url, options }; return { ok: true, json: async () => ({ meals: [] }) }; },
+  });
+  await result.fetchDailyLog("2026-10-07");
+  assert.equal(request.options.headers.get("Authorization"), "Bearer test-token");
+  assert.match(request.url, /api\/nutrition\/daily/);
 });

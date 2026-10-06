@@ -1,3 +1,5 @@
+-- Legacy scaffold: not the shared team database schema.
+-- Meal analysis now uses migrations/20261008_team_meal_tables.sql on the existing team tables.
 CREATE TABLE IF NOT EXISTS public.meals (
     id UUID PRIMARY KEY,
     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,

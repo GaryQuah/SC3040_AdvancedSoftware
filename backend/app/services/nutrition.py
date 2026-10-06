@@ -20,7 +20,6 @@ from app.models.nutrition import (
     MealAnalysis,
     MealCreate,
     MealEstimate,
-    MealRecord,
 )
 
 register_heif_opener()
@@ -130,45 +129,68 @@ async def analyze_image(image: bytes, notes: str) -> MealAnalysis:
 
 
 def record(row: dict) -> dict:
-    return {key: row[key] for key in MealRecord.model_fields if key != "items"} | {
-        "items": row["breakdown"]
+    items = [
+        {
+            "name": item["name"],
+            "estimated_weight_g": item.get("estimated_weight"),
+            "calories": item.get("calories"),
+            "protein_g": item.get("protein"),
+            "carbs_g": item.get("carbs"),
+            "fat_g": item.get("fats"),
+        }
+        for item in row["food_items"]
+    ]
+    # Older team records can have unknown nutrients; never report those as zero.
+    nutrients = {
+        output: round(sum(item[key] for item in items), 1)
+        if items and all(item[key] is not None for item in items)
+        else None
+        for output, key in (
+            ("total_calories", "calories"),
+            ("protein_g", "protein_g"),
+            ("carbs_g", "carbs_g"),
+            ("fat_g", "fat_g"),
+        )
+    }
+    if nutrients["total_calories"] is None:
+        nutrients["total_calories"] = row.get("total_calories")
+    return {
+        "id": row["log_id"],
+        "meal_name": row.get("meal_name") or "Meal",
+        "meal_type": row.get("meal_type"),
+        "logged_at": row["timestamp"],
+        "confidence_score": row.get("confidence_score"),
+        "training_context_note": row.get("training_context_note") or "",
+        "items": items,
+        **nutrients,
     }
 
 
 def save_meal(db: Client, user_id: str, meal: MealCreate) -> dict:
-    # A client-generated ID makes retrying a save safe after a lost response.
-    existing = (
-        db.table("meals")
-        .select("*")
-        .eq("user_id", user_id)
-        .eq("id", str(meal.id))
-        .execute()
-    )
-    if existing.data:
-        return record(existing.data[0])
-    payload = meal.model_dump(mode="json", exclude={"items"})
-    payload.update(
-        user_id=user_id,
-        breakdown=[item.model_dump() for item in meal.items],
-        **totals(meal.items),
-    )
+    # The database function saves parent and ingredients in one transaction.
     try:
-        result = db.table("meals").insert(payload).execute()
+        db.rpc(
+            "save_nutrition_meal",
+            {"p_user_id": user_id, "p_meal": meal.model_dump(mode="json")},
+        ).execute()
     except APIError as exc:
-        if exc.code != "23505":
-            raise
-        existing = (
-            db.table("meals")
-            .select("*")
-            .eq("user_id", user_id)
-            .eq("id", str(meal.id))
-            .execute()
-        )
-        if not existing.data:
+        if exc.code == "23503":
+            raise HTTPException(
+                409,
+                "Your account needs a user profile before logging meals. Ask your team to create it.",
+            ) from exc
+        if exc.code == "23505":
             raise HTTPException(
                 409, "This meal ID is unavailable. Start a new meal."
             ) from exc
-        return record(existing.data[0])
+        raise
+    result = (
+        db.table("meal_plans")
+        .select("*,food_items(*)")
+        .eq("user_id", user_id)
+        .eq("log_id", str(meal.id))
+        .execute()
+    )
     return record(result.data[0])
 
 
@@ -180,24 +202,30 @@ def daily_log(db: Client, user_id: str, day: date, offset_minutes: int) -> dict:
         end.astimezone(timezone.utc).isoformat(),
     )
     meals = (
-        db.table("meals")
-        .select("*")
+        db.table("meal_plans")
+        .select("*,food_items(*)")
         .eq("user_id", user_id)
-        .gte("logged_at", start_iso)
-        .lt("logged_at", end_iso)
-        .order("logged_at", desc=True)
+        .gte("timestamp", start_iso)
+        .lt("timestamp", end_iso)
+        .order("timestamp", desc=True)
         .execute()
         .data
     )
-    activities = (
-        db.table("activities")
-        .select("calories")
-        .eq("user_id", user_id)
-        .gte("start_date", start_iso)
-        .lt("start_date", end_iso)
-        .execute()
-        .data
-    )
+    try:
+        activities = (
+            db.table("activities")
+            .select("calories")
+            .eq("user_id", user_id)
+            .gte("start_date", start_iso)
+            .lt("start_date", end_iso)
+            .execute()
+            .data
+        )
+    except APIError as exc:
+        # The shared team schema does not yet contain imported Strava activities.
+        if exc.code not in {"42P01", "PGRST205"}:
+            raise
+        activities = []
     try:
         profiles = (
             db.table("users")
@@ -228,16 +256,20 @@ def daily_log(db: Client, user_id: str, day: date, offset_minutes: int) -> dict:
         if activities and all(row.get("calories") is not None for row in activities)
         else None
     )
-    total = totals(
-        [FoodItem.model_validate(item) for meal in meals for item in meal["breakdown"]]
-    )
+    records = [record(row) for row in meals]
+    total = {
+        key: round(sum(meal[key] for meal in records), 1)
+        if all(meal[key] is not None for meal in records)
+        else None
+        for key in ("total_calories", "protein_g", "carbs_g", "fat_g")
+    }
     return {
         "date": day.isoformat(),
-        "meals": [record(row) for row in meals],
+        "meals": records,
         **total,
         "bmr": bmr,
         "active_calories": burn,
         "net_energy": round(total["total_calories"] - bmr - burn, 1)
-        if bmr is not None and burn is not None
+        if bmr is not None and burn is not None and total["total_calories"] is not None
         else None,
     }

@@ -1,3 +1,5 @@
+-- Legacy scaffold: not the shared team database schema.
+-- Meal analysis now uses migrations/20261008_team_meal_tables.sql on the existing team tables.
 -- Supabase PostgreSQL Schema for AI-Driven Endurance Platform
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";

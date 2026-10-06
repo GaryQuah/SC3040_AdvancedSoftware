@@ -63,10 +63,10 @@ def delete_meal(meal_id: UUID, user_id: str = Depends(get_current_user_id)):
     try:
         result = (
             get_supabase_admin()
-            .table("meals")
-            .delete()
-            .eq("id", str(meal_id))
-            .eq("user_id", user_id)
+            .rpc(
+                "delete_nutrition_meal",
+                {"p_user_id": user_id, "p_log_id": str(meal_id)},
+            )
             .execute()
         )
     except (APIError, httpx.RequestError) as exc:

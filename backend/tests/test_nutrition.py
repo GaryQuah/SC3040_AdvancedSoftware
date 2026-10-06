@@ -98,6 +98,48 @@ class Database:
     def table(self, name):
         return Query(self, name)
 
+    def rpc(self, name, params):
+        if name == "save_nutrition_meal":
+            meal, user = params["p_meal"], params["p_user_id"]
+            rows = self.rows.setdefault("meal_plans", [])
+            existing = next((row for row in rows if row["log_id"] == meal["id"]), None)
+            if existing is None:
+                rows.append(
+                    {
+                        "log_id": meal["id"],
+                        "user_id": user,
+                        "timestamp": meal["logged_at"],
+                        "meal_name": meal["meal_name"],
+                        "meal_type": meal["meal_type"],
+                        "confidence_score": meal["confidence_score"],
+                        "training_context_note": meal["training_context_note"],
+                        "food_items": [
+                            {
+                                "name": item["name"],
+                                "estimated_weight": item["estimated_weight_g"],
+                                "calories": item["calories"],
+                                "protein": item["protein_g"],
+                                "carbs": item["carbs_g"],
+                                "fats": item["fat_g"],
+                            }
+                            for item in meal["items"]
+                        ],
+                    }
+                )
+            elif existing["user_id"] != user:
+                raise nutrition.APIError({"code": "23505", "message": "collision"})
+            return SimpleNamespace(execute=lambda: SimpleNamespace(data=meal["id"]))
+        assert name == "delete_nutrition_meal"
+        rows = self.rows.setdefault("meal_plans", [])
+        selected = [
+            row
+            for row in rows
+            if row["log_id"] == params["p_log_id"]
+            and row["user_id"] == params["p_user_id"]
+        ]
+        self.rows["meal_plans"] = [row for row in rows if row not in selected]
+        return SimpleNamespace(execute=lambda: SimpleNamespace(data=bool(selected)))
+
 
 @pytest.fixture
 def client(monkeypatch):
@@ -201,8 +243,8 @@ def test_save_recalculates_and_is_idempotent(client):
     second = api.post("/api/nutrition/meals", json=body)
     assert first.status_code == second.status_code == 201
     assert first.json()["total_calories"] == 390
-    assert len(db.rows["meals"]) == 1
-    assert db.rows["meals"][0]["user_id"] == USER
+    assert len(db.rows["meal_plans"]) == 1
+    assert db.rows["meal_plans"][0]["user_id"] == USER
 
 
 @pytest.mark.parametrize(
@@ -282,7 +324,7 @@ def test_delete_only_owned_meal(client):
     nutrition.save_meal(db, OTHER, other)
     assert api.delete(f"/api/nutrition/meals/{other.id}").status_code == 404
     assert api.delete(f"/api/nutrition/meals/{mine.id}").status_code == 204
-    assert len(db.rows["meals"]) == 1
+    assert len(db.rows["meal_plans"]) == 1
 
 
 @pytest.mark.asyncio
@@ -354,3 +396,58 @@ async def test_gemini_response_handling(monkeypatch, scenario, expected):
         assert result.total_calories == 195
         assert result.protein_g == 4
         assert generate.call_args.kwargs["model"] == "fixture-model"
+
+
+def test_shared_schema_missing_activities_keeps_meals_available(client, monkeypatch):
+    api, db = client
+    nutrition.save_meal(db, USER, MealCreate(**payload()))
+    original = db.table
+
+    def table(name):
+        if name == "activities":
+            raise nutrition.APIError({"code": "PGRST205", "message": "missing table"})
+        return original(name)
+
+    monkeypatch.setattr(db, "table", table)
+    result = api.get("/api/nutrition/daily?day=2026-10-07").json()
+    assert result["total_calories"] == 195
+    assert result["active_calories"] is result["net_energy"] is None
+
+
+def test_legacy_incomplete_meal_values_remain_unknown(client):
+    api, db = client
+    db.rows["meal_plans"] = [
+        {
+            "log_id": str(uuid4()),
+            "user_id": USER,
+            "timestamp": "2026-10-07T04:00:00Z",
+            "total_calories": 200,
+            "food_items": [{"name": "Older food", "calories": None}],
+        }
+    ]
+    result = api.get("/api/nutrition/daily?day=2026-10-07").json()
+    assert result["total_calories"] == 200
+    assert result["protein_g"] is None
+    assert result["meals"][0]["items"][0]["estimated_weight_g"] is None
+
+
+def test_save_id_collision_does_not_expose_another_users_meal(client):
+    api, db = client
+    body = payload()
+    nutrition.save_meal(db, OTHER, MealCreate(**body))
+    assert api.post("/api/nutrition/meals", json=body).status_code == 409
+    assert len(db.rows["meal_plans"]) == 1
+
+
+@pytest.mark.parametrize("code,status", [("23503", 409), ("PGRST202", 503)])
+def test_missing_profile_or_migration_has_actionable_error(
+    client, monkeypatch, code, status
+):
+    api, db = client
+
+    def fail(*_):
+        raise nutrition.APIError({"code": code, "message": "database setup missing"})
+
+    monkeypatch.setattr(db, "rpc", fail)
+    result = api.post("/api/nutrition/meals", json=payload())
+    assert result.status_code == status

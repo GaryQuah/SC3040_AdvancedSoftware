@@ -19,7 +19,7 @@ async function main() {
   fs.mkdirSync(output, { recursive: true });
   const server = spawn(process.execPath, ["-e", "require('next/dist/server/lib/start-server').startServer({dir:process.cwd(),isDev:true,port:3107,hostname:'127.0.0.1',allowRetry:false})"], {
     cwd: frontend, windowsHide: true,
-    env: { ...process.env, NEXT_PUBLIC_NUTRITION_DEMO_MODE: "false", NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key", NEXT_PUBLIC_BACKEND_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_STRAVA_CLIENT_ID: "", NEXT_PUBLIC_STRAVA_REDIRECT_URI: "" },
+    env: { ...process.env, NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_SUPABASE_ANON_KEY: "test-anon-key", NEXT_PUBLIC_BACKEND_URL: "http://127.0.0.1:54329", NEXT_PUBLIC_STRAVA_CLIENT_ID: "", NEXT_PUBLIC_STRAVA_REDIRECT_URI: "" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let serverLog = "";
