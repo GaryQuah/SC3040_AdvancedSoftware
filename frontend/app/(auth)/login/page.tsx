@@ -47,9 +47,7 @@ export default function LoginPage() {
             <Activity className="h-8 w-8 stroke-[2.5]" />
           </div>
 
-          <h1 className="text-3xl font-bold text-white">
-            FITRA
-          </h1>
+          <h1 className="text-3xl font-bold text-white">FITRA</h1>
 
           <p className="mt-2 text-slate-400">
             AI-driven endurance and recovery optimisation.
@@ -59,9 +57,7 @@ export default function LoginPage() {
         {/* Login Card */}
         <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-8 shadow-2xl backdrop-blur">
           <div className="mb-6">
-            <h2 className="text-2xl font-semibold text-white">
-              Welcome back
-            </h2>
+            <h2 className="text-2xl font-semibold text-white">Welcome back</h2>
 
             <p className="mt-1 text-sm text-slate-400">
               Log in to continue tracking your health.
@@ -138,10 +134,7 @@ export default function LoginPage() {
                 className="h-4 w-4 rounded border-slate-700 bg-slate-950 text-emerald-500 focus:ring-emerald-500"
               />
 
-              <label
-                htmlFor="remember"
-                className="text-sm text-slate-400"
-              >
+              <label htmlFor="remember" className="text-sm text-slate-400">
                 Remember me
               </label>
             </div>
@@ -176,4 +169,3 @@ export default function LoginPage() {
     </main>
   );
 }
-
