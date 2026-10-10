@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Activity,
   Home,
@@ -13,12 +13,12 @@ import {
   User,
   Settings,
 } from "lucide-react";
+import { createClient } from "@/lib/supabase/client";
 
-interface UserData {
+type HeaderUser = {
   name: string;
   email: string;
-  image: string | null;
-}
+};
 
 export default function DashboardLayout({
   children,
@@ -26,24 +26,74 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
-  const [user, setUser] = useState<UserData | null>(null);
+  const [user, setUser] = useState<HeaderUser | null>(null);
+  const router = useRouter();
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
 
   useEffect(() => {
-    async function fetchUserData() {
-      try {
-        const response = await fetch("/api/user");
-        if (!response.ok) {
-          throw new Error("Failed to fetch user data");
-        }
-        const userData = await response.json();
-        setUser(userData);
-      } catch (error) {
-        console.error("Error fetching user data:", error);
+    const supabase = createClient();
+
+    // Get the currently logged-in user.
+    const getCurrentUser = async () => {
+      const { data, error } = await supabase.auth.getUser();
+
+      if (error || !data.user) {
+        setUser(null);
+        return;
       }
+
+      const currentUser = data.user;
+
+      setUser({
+        name:
+          currentUser.user_metadata?.name ||
+          currentUser.email?.split("@")[0] ||
+          "User",
+        email: currentUser.email || "",
+      });
+    };
+
+    getCurrentUser();
+
+    // Keep the header updated when the authentication state changes.
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      const currentUser = session?.user;
+
+      if (!currentUser) {
+        setUser(null);
+        return;
+      }
+
+      setUser({
+        name:
+          currentUser.user_metadata?.name ||
+          currentUser.email?.split("@")[0] ||
+          "User",
+        email: currentUser.email || "",
+      });
+    });
+
+    return () => {
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const handleLogout = async () => {
+    const supabase = createClient();
+
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      console.error("Logout failed:", error.message);
+      return;
     }
 
-    fetchUserData();
-  }, []);
+    setIsMenuOpen(false);
+    router.replace("/login");
+    router.refresh();
+  };
 
   const navItems = [
     { name: "Home", href: "/dashboard", icon: Home },
@@ -70,10 +120,14 @@ export default function DashboardLayout({
               </span>
             </Link>
 
-            {/* Navigation links container */}
+            {/* Navigation links */}
             <nav className="hidden md:flex items-center gap-1.5 rounded-xl border border-slate-800/80 bg-slate-900/40 p-1.5 text-xs">
               {navItems.map((item) => {
-                const isActive = pathname === item.href;
+                const isActive =
+                  pathname === item.href ||
+                  (item.href !== "/dashboard" &&
+                    pathname.startsWith(`${item.href}/`));
+
                 const Icon = item.icon;
 
                 return (
@@ -94,13 +148,57 @@ export default function DashboardLayout({
             </nav>
           </div>
 
-          {/* Right: welcome message + user icon */}
-          <div className="flex items-center gap-3">
+          {/* Right: user menu */}
+          <div className="relative flex items-center">
             {user && (
-              <p className="hidden sm:block text-sm text-slate-200">
-                Welcome back,{" "}
-                <span className="font-semibold text-white">{user.name}</span>
-              </p>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setIsMenuOpen((open) => !open)}
+                  aria-expanded={isMenuOpen}
+                  aria-haspopup="menu"
+                  className="flex items-center gap-3 rounded-lg px-2 py-1.5 transition-colors hover:bg-slate-800/60"
+                >
+                  <p className="hidden sm:block text-sm text-slate-200">
+                    Welcome back,{" "}
+                    <span className="font-semibold text-white">
+                      {user.name}
+                    </span>
+                  </p>
+
+                  <div
+                    className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border border-slate-700 bg-slate-800 text-emerald-400"
+                    title={user.email}
+                  >
+                    <User className="h-4 w-4" />
+                  </div>
+                </button>
+
+                {isMenuOpen && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-50 mt-2 w-52 rounded-xl border border-slate-700 bg-slate-900 p-2 shadow-xl"
+                  >
+                    <div className="border-b border-slate-700 px-3 py-2">
+                      <p className="text-sm font-semibold text-white">
+                        {user.name}
+                      </p>
+                      <p className="truncate text-xs text-slate-400">
+                        {user.email}
+                      </p>
+                    </div>
+
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={handleLogout}
+                      className="mt-1 flex w-full items-center rounded-lg px-3 py-2 text-sm text-red-400 transition-colors hover:bg-red-500/10"
+                    >
+                      Logout
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
