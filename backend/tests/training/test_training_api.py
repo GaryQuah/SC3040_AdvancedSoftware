@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 from app.commons.auth import deps
 from app.commons.auth.deps import get_current_user_id
 from app.training.clock import get_client_date
+from app.training.config import RULES
 from app.training import router as router_module
 from app.training.ml.scorer import ModelScorer, load_scorer
+from app.training.planner import AthleteProfile
 from app.training.readiness import RuleBasedScorer
 from app.training.router import TRAINING_PREFIX, get_service, install, readiness_router, router
 from app.training.service import TrainingService
@@ -339,6 +341,200 @@ def test_scoring_endpoint_is_stateless_and_validated(client, repo):
     assert client.post("/api/v1/readiness/score", json=features).status_code == 401
 
 
+# ------------------------------------------------------------------ goal, exam dates and sleep
+
+
+def put_sleep(client, hours, user: str = USER_A):
+    return client.put("/api/v1/training/sleep", json={"hours": hours}, headers=headers(user))
+
+
+def today_body(client, user: str = USER_A) -> dict:
+    return client.get("/api/v1/training/today", headers=headers(user)).json()
+
+
+def test_sleep_is_logged_for_the_users_today_and_feeds_the_readiness_card(client):
+    before = today_body(client)
+    assert before["sleepHours"] is None
+    saved = put_sleep(client, 5.5)
+    assert saved.status_code == 200 and saved.json() == {"date": TODAY.isoformat(), "hours": 5.5}
+    after = today_body(client)
+    assert after["sleepHours"] == 5.5 and after["readiness"]["score"] < before["readiness"]["score"]
+    assert any(f["key"] == "sleep" and f["detail"] == "5.5 h last night" for f in after["readiness"]["factors"])
+
+
+def test_one_users_sleep_is_invisible_to_everyone_else(client):
+    put_sleep(client, 3)
+    mine, other = today_body(client, USER_A), today_body(client, USER_B)
+    assert other["sleepHours"] is None and other["readiness"]["score"] > mine["readiness"]["score"]
+
+
+@pytest.mark.parametrize("body", [{"hours": -1}, {"hours": 17}, {}, {"hours": "lots"}, {"hours": None}])
+def test_bad_sleep_is_a_validation_error_and_nothing_is_stored(client, repo, body):
+    response = client.put("/api/v1/training/sleep", json=body, headers=headers())
+    detail = response.json()["detail"]
+    assert response.status_code == 422 and detail["code"] == "VALIDATION" and "hours" in detail["fieldErrors"]
+    assert repo.sleep == {}
+
+
+def test_sleep_can_be_cleared_again(client, repo):
+    put_sleep(client, 6)
+    assert client.delete("/api/v1/training/sleep", headers=headers()).status_code == 204
+    assert repo.sleep == {} and today_body(client)["sleepHours"] is None
+
+
+def test_the_sleep_routes_need_a_token(client, repo):
+    assert client.put("/api/v1/training/sleep", json={"hours": 6}).status_code in (401, 403)
+    assert client.delete("/api/v1/training/sleep").status_code in (401, 403)
+    assert client.put("/api/v1/training/sleep", json={"hours": 6}, headers={"Authorization": "Bearer forged"}).status_code == 401
+    assert repo.sleep == {}
+
+
+def test_exam_dates_come_back_sorted_and_an_exam_that_has_passed_is_dropped(client):
+    soon, later, gone = (TODAY + timedelta(days=3)).isoformat(), (TODAY + timedelta(days=10)).isoformat(), (TODAY - timedelta(days=1)).isoformat()
+    saved = client.put("/api/v1/training/preferences", json={**PREFS, "examDates": [later, gone, soon]}, headers=headers()).json()
+    assert saved["examDates"] == [soon, later]
+    assert client.get("/api/v1/training/preferences", headers=headers()).json()["examDates"] == [soon, later]
+
+
+def test_exam_dates_are_optional(client):
+    assert client.put("/api/v1/training/preferences", json=PREFS, headers=headers()).json()["examDates"] == []
+
+
+@pytest.mark.parametrize("dates", [
+    [(TODAY + timedelta(days=i)).isoformat() for i in range(RULES.exam_dates_max + 1)],
+    [(TODAY + timedelta(days=RULES.exam_dates_horizon_days + 1)).isoformat()],
+    ["2026-13-45"],
+    ["soon"],
+])
+def test_too_many_too_distant_or_malformed_exam_dates_are_field_errors(client, dates):
+    response = client.put("/api/v1/training/preferences", json={**PREFS, "examDates": dates}, headers=headers())
+    detail = response.json()["detail"]
+    assert response.status_code == 422 and detail["code"] == "VALIDATION"
+    assert any(key.startswith("examDates") for key in detail["fieldErrors"])
+    assert client.get("/api/v1/training/preferences", headers=headers()).json() is None
+
+
+def test_an_exam_date_lowers_todays_readiness_over_http(client):
+    before = today_body(client)
+    exam = (TODAY + timedelta(days=1)).isoformat()
+    assert client.put("/api/v1/training/preferences", json={**PREFS, "examDates": [exam]}, headers=headers()).status_code == 200
+    after = today_body(client)
+    assert after["readiness"]["score"] < before["readiness"]["score"]
+    assert any(f["key"] == "exam" and f["detail"] == "Exam in 1 day" for f in after["readiness"]["factors"])
+
+
+def test_the_plan_reports_the_goal_it_was_built_for(client, repo):
+    onboard(client, repo)
+    assert generate(client).json()["goal"] is None  # no profile, no goal
+
+    repo.profiles[USER_A] = AthleteProfile(fitness_goal="DEFICIT")
+    plan = generate(client, confirm=True).json()
+    assert plan["goal"] == "lose_weight"
+    assert client.get("/api/v1/training/plan", headers=headers()).json()["goal"] == "lose_weight"
+
+
+# ------------------------------------------------------------------ Home summary and the coach
+
+
+class StubCoach:
+    model = "gemini-2.5-flash"
+
+    def __init__(self, reply="Keep it easy today."):
+        self.reply, self.calls = reply, 0
+
+    def complete(self, system, prompt):
+        self.calls += 1
+        return self.reply
+
+
+def with_coach(app, repo, coach, clock=None):
+    # One service for every request, like the deployed app, so what the coach remembers persists.
+    service = TrainingService(repo, RuleBasedScorer(), coach=coach, clock=clock or (lambda: 1000.0))
+    app.dependency_overrides[get_service] = lambda: service
+    return TestClient(app)
+
+
+def test_the_summary_is_one_call_with_everything_a_home_card_needs(client, repo):
+    onboard(client, repo)
+    generate(client)
+    response = client.get("/api/v1/training/summary", headers=headers())
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"date", "hasPlan", "goal", "readiness", "today", "week", "nextSession"}
+    assert body["hasPlan"] is True and body["today"]["state"] == "to_do"
+    assert body["today"]["session"]["id"] and body["today"]["recommendation"]["explanation"]
+    assert set(body["week"]) == {"start", "end", "plannedSessions", "completedSessions", "missedSessions", "loggedMinutes"}
+    assert body["nextSession"]["date"] > body["date"]
+    assert body["readiness"] == client.get("/api/v1/training/today", headers=headers()).json()["readiness"]
+
+
+def test_the_summary_for_a_new_user_is_empty_but_valid(client):
+    body = client.get("/api/v1/training/summary", headers=headers()).json()
+    assert body["hasPlan"] is False and body["today"]["state"] == "no_plan" and body["nextSession"] is None
+    assert body["week"]["plannedSessions"] == 0 and body["readiness"]["score"] >= 0
+
+
+def test_the_summary_is_private_to_the_signed_in_user(client, repo):
+    onboard(client, repo, USER_A)
+    generate(client, user=USER_A)
+    theirs = client.get("/api/v1/training/summary", headers=headers(USER_B)).json()
+    assert theirs["hasPlan"] is False and theirs["today"]["session"] is None and theirs["week"]["loggedMinutes"] == 0
+
+
+def test_the_summary_and_the_coach_need_a_real_token(client):
+    for call in (lambda h: client.get("/api/v1/training/summary", headers=h),
+                 lambda h: client.post("/api/v1/training/coach", headers=h)):
+        assert call({}).status_code in (401, 403)
+        assert call({"Authorization": "Bearer forged"}).status_code == 401
+
+
+def test_the_coach_answers_with_gemini_text_a_notice_and_no_readiness(app, repo):
+    onboard(TestClient(app), repo)
+    client = with_coach(app, repo, StubCoach("Easy does it today."))
+    generate(client)
+    body = client.post("/api/v1/training/coach", headers=headers()).json()
+    assert set(body) == {"date", "message", "source", "model", "cached", "notice"}
+    assert body["message"] == "Easy does it today." and body["source"] == "gemini" and body["cached"] is False
+    assert "not medical advice" in body["notice"]
+    assert "readiness" not in str(body).lower() and "score" not in str(body).lower()
+
+
+def test_the_same_coach_question_twice_costs_one_call(app, repo):
+    coach = StubCoach()
+    onboard(TestClient(app), repo)
+    client = with_coach(app, repo, coach)
+    generate(client)
+    first = client.post("/api/v1/training/coach", headers=headers()).json()
+    second = client.post("/api/v1/training/coach", headers=headers()).json()
+    assert coach.calls == 1 and second["cached"] is True and second["message"] == first["message"]
+
+
+def test_asking_again_after_things_changed_too_quickly_is_a_429_in_the_usual_error_shape(app, repo):
+    coach = StubCoach()
+    onboard(TestClient(app), repo)
+    client = with_coach(app, repo, coach)
+    generate(client)
+    client.post("/api/v1/training/coach", headers=headers())
+    session = sessions_of(client, TODAY, TODAY)[0]
+    client.post(f"/api/v1/training/sessions/{session['id']}/log", headers=headers(),
+                json={"date": TODAY.isoformat(), "activityType": "run", "actualDurationMin": 30,
+                      "actualVolume": session["targetVolume"]})
+    refused = client.post("/api/v1/training/coach", headers=headers())
+    assert refused.status_code == 429 and refused.json()["detail"]["code"] == "RATE_LIMITED"
+    assert coach.calls == 1
+
+
+def test_without_a_gemini_key_the_coach_still_answers(client, repo):
+    onboard(client, repo)
+    generate(client)
+    body = client.post("/api/v1/training/coach", headers=headers()).json()
+    assert body["source"] == "fallback" and body["model"] is None and body["message"]
+
+
+def test_the_coach_is_a_post_because_it_can_cost_money(client):
+    assert client.get("/api/v1/training/coach", headers=headers()).status_code == 405
+
+
 # ------------------------------------------------------------------ Hard Rule 4: readiness stays private
 
 
@@ -355,8 +551,12 @@ def _models_in(node, seen: set) -> set:
     return seen
 
 
-def test_readiness_appears_in_exactly_two_operations():
-    """Hard Rule 4: scores are never part of any plan, schedule or friend-style response."""
+def test_readiness_appears_in_exactly_three_operations():
+    """
+    Hard Rule 4: scores are never part of any plan, schedule, coach or friend-style response. The three
+    that carry one are the user's own Today view, their own Home summary, and the stateless scoring call.
+    Adding a fourth should be a decision, not an accident, so it has to be added here.
+    """
     application = FastAPI()
     install(application)
     schema = application.openapi()
@@ -378,7 +578,12 @@ def test_readiness_appears_in_exactly_two_operations():
             if {"ReadinessScore", "ReadinessFactor"} & models:
                 exposing.append((method.upper(), path))
 
-    assert sorted(exposing) == [("GET", "/api/v1/training/today"), ("POST", "/api/v1/readiness/score")]
+    assert sorted(exposing) == [
+        ("GET", "/api/v1/training/summary"),
+        ("GET", "/api/v1/training/today"),
+        ("POST", "/api/v1/readiness/score"),
+    ]
+    assert ("POST", "/api/v1/training/coach") not in exposing
 
 
 # ------------------------------------------------------------------ contract with the frontend
@@ -406,6 +611,8 @@ def test_responses_contain_every_field_the_frontend_types_declare(client, repo):
     plan = client.get("/api/v1/training/plan", headers=headers()).json()
     today = client.get("/api/v1/training/today", headers=headers()).json()
     schedule = client.get(f"/api/v1/training/schedule?from={TODAY}&to={TODAY + timedelta(days=6)}", headers=headers()).json()
+    summary = client.get("/api/v1/training/summary", headers=headers()).json()
+    coach = client.post("/api/v1/training/coach", headers=headers()).json()
 
     checks = {
         "TrainingPreferences": client.get("/api/v1/training/preferences", headers=headers()).json(),
@@ -418,6 +625,11 @@ def test_responses_contain_every_field_the_frontend_types_declare(client, repo):
         "SessionRecommendation": today["recommendation"],
         "TodayView": today,
         "Schedule": schedule,
+        "TrainingSummary": summary,
+        "TodaySummary": summary["today"],
+        "WeekProgress": summary["week"],
+        "NextSession": summary["nextSession"],
+        "CoachMessage": coach,
     }
     for name, payload in checks.items():
         missing = _interface_fields(name) - set(payload)

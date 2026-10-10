@@ -3,17 +3,32 @@ Application logic for the training routine. Every method takes the user id from 
 session (never from a request body) and `today` from the caller, so it stays pure and testable.
 """
 import logging
+import threading
+import time
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from uuid import uuid4
 
-from .config import PLAN_NOTICE, RULES, TrainingRules
+from .coach import (
+    SYSTEM_INSTRUCTION,
+    CoachClient,
+    CoachContext,
+    CoachUnavailable,
+    build_prompt,
+    clean,
+    fallback_message,
+    weekday_name,
+)
+from .config import COACH_RULES, PLAN_NOTICE, RULES, CoachRules, TrainingRules
 from .errors import TrainingError
 from .models import (
+    CoachMessage,
     GeneratePlanRequest,
     LogResult,
     LogWorkoutInput,
     ModelInfo,
+    NextSession,
     PlanAdaptation,
     PlannedSession,
     ReadinessScore,
@@ -21,24 +36,39 @@ from .models import (
     Schedule,
     ScoreResult,
     SessionResponseRequest,
+    SleepEntry,
+    SleepInput,
+    TodaySummary,
     TodayView,
     TrainingPlan,
     TrainingPreferences,
     TrainingPreferencesInput,
+    TrainingSummary,
+    WeekProgress,
     WorkoutSession,
 )
 from .planner import (
+    AthleteProfile,
     Baseline,
     WeekTarget,
     baseline_from_history,
     build_sessions,
     first_unsafe_week,
+    goal_for,
+    modelling_workouts,
     plan_end_date,
     round_half_up,
     week_start,
     weekly_targets,
 )
-from .readiness import ActivityRecord, ReadinessFeatures, ReadinessScorer, build_features, fingerprint
+from .readiness import (
+    ActivityRecord,
+    ReadinessFeatures,
+    ReadinessScorer,
+    build_features,
+    days_until_next_exam,
+    fingerprint,
+)
 from .repository import ChangeSet, TrainingRepository
 from .rules import LOGGABLE_STATUSES, MOVABLE_STATUSES, MoveContext, check_move, reconcile
 
@@ -53,24 +83,76 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@dataclass(frozen=True)
+class PlanSnapshot:
+    """
+    The plan side of "how is today going": the plan, today's session, the week so far and what is next.
+    It involves no readiness, which is how the coach gets its facts without computing a score.
+    """
+
+    plan: Optional[TrainingPlan]
+    session: Optional[PlannedSession]
+    logged: Optional[WorkoutSession]
+    week: WeekProgress
+    next_session: Optional[NextSession]
+
+    @property
+    def state(self) -> str:
+        if self.plan is None:
+            return "no_plan"
+        if self.session is None:
+            return "rest_day"
+        if self.session.status in ("completed", "partial"):
+            return "done"
+        if self.session.status == "missed":
+            return "missed"
+        return "to_do"
+
+
 class TrainingService:
     def __init__(
         self,
         repository: TrainingRepository,
         scorer: ReadinessScorer,
         rules: TrainingRules = RULES,
+        *,
+        coach: Optional[CoachClient] = None,
+        coach_rules: CoachRules = COACH_RULES,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.repo = repository
         self.scorer = scorer
         self.rules = rules
+        self.coach = coach
+        self.coach_rules = coach_rules
+        self._clock = clock
+        # What the coach said and when each user last asked, in this process's memory only.
+        self._coach_lock = threading.Lock()
+        self._coach_cache: Dict[str, Tuple[float, CoachMessage]] = {}
+        self._coach_last_call: Dict[str, float] = {}
 
     # ------------------------------------------------------------------ preferences (T-1)
 
     def get_preferences(self, user_id: str) -> Optional[TrainingPreferences]:
         return self.repo.get_preferences(user_id)
 
-    def save_preferences(self, user_id: str, data: TrainingPreferencesInput) -> TrainingPreferences:
-        preferences = TrainingPreferences(**data.model_dump(), updated_at=_now())
+    def save_preferences(
+        self, user_id: str, today: date, data: TrainingPreferencesInput
+    ) -> TrainingPreferences:
+        horizon = today + timedelta(days=self.rules.exam_dates_horizon_days)
+        if any(day > horizon for day in data.exam_dates):
+            raise TrainingError(
+                "VALIDATION",
+                "Check the highlighted fields.",
+                field_errors={
+                    "examDates": f"Exam dates can be at most {self.rules.exam_dates_horizon_days} days ahead"
+                },
+            )
+        # An exam that has passed no longer matters, so it isn't kept.
+        upcoming = [day for day in data.exam_dates if day >= today]
+        preferences = TrainingPreferences(
+            **{**data.model_dump(), "exam_dates": upcoming}, updated_at=_now()
+        )
         self.repo.save_preferences(user_id, preferences)
         return preferences
 
@@ -89,7 +171,9 @@ class TrainingService:
         if existing and not request.confirm_replace:
             raise TrainingError("PLAN_EXISTS", "You already have an active plan. Confirm to replace it.")
 
-        baseline = self._baseline(user_id, today)
+        profile = self.repo.get_profile(user_id)
+        goal = goal_for(profile, self.rules)
+        baseline = self._baseline(user_id, today, profile)
         targets = weekly_targets(baseline.volume, request.weeks, 0, self.rules)
         self._require_safe(targets)
 
@@ -103,6 +187,7 @@ class TrainingService:
             baseline_volume=baseline.volume,
             created_at=_now(),
             notice=PLAN_NOTICE,
+            goal=goal,
             last_adaptation=None,
         )
 
@@ -116,7 +201,7 @@ class TrainingService:
             if existing and s.plan_id == existing.id and s.status in MOVABLE_STATUSES
         ]
         taken = {s.date for s in upcoming if s.id not in drop}
-        sessions = self._new_sessions(plan.id, preferences, start, targets, today, taken)
+        sessions = self._new_sessions(plan.id, preferences, start, targets, today, taken, goal)
 
         self.repo.apply(
             user_id,
@@ -216,13 +301,152 @@ class TrainingService:
                 (s for s in self.repo.list_sessions(user_id, today, today) if s.plan_id == plan.id),
                 None,
             )
-        readiness = self._readiness(user_id, today)
+        sleep_hours = self.repo.get_sleep(user_id, today)
+        readiness = self._readiness(user_id, today, sleep_hours)
         return TodayView(
             date=today,
             readiness=readiness,
             planned=planned,
             recommendation=reconcile(planned, readiness, self.rules) if planned else None,
             logged=self.repo.get_workout_for_session(user_id, planned.id) if planned else None,
+            sleep_hours=sleep_hours,
+        )
+
+    # ------------------------------------------------------------------ Home summary and coach
+
+    def get_summary(self, user_id: str, today: date) -> TrainingSummary:
+        """Everything a Home card needs in one read: readiness, today, the week and what is next."""
+        snapshot = self._snapshot(user_id, today)
+        readiness = self._readiness(user_id, today, self.repo.get_sleep(user_id, today))
+        recommendation = (
+            reconcile(snapshot.session, readiness, self.rules)
+            if snapshot.state == "to_do" and snapshot.session
+            else None
+        )
+        return TrainingSummary(
+            date=today,
+            has_plan=snapshot.plan is not None,
+            goal=snapshot.plan.goal if snapshot.plan else None,
+            readiness=readiness,
+            today=TodaySummary(
+                state=snapshot.state,  # type: ignore[arg-type]
+                session=snapshot.session,
+                recommendation=recommendation,
+                logged=snapshot.logged,
+            ),
+            week=snapshot.week,
+            next_session=snapshot.next_session,
+        )
+
+    def get_coach_message(self, user_id: str, today: date) -> CoachMessage:
+        """
+        A short note about today from Gemini, or the built-in text when Gemini isn't configured or
+        can't answer. The facts come from the plan snapshot only: readiness is never computed here.
+        """
+        snapshot = self._snapshot(user_id, today)
+        context = self._coach_context(snapshot, today)
+        if self.coach is None:
+            return self._coach_message(today, fallback_message(context), "fallback", None)
+
+        key = f"{user_id}:{context.fingerprint(today)}"
+        now = self._clock()
+        with self._coach_lock:
+            hit = self._coach_cache.get(key)
+            if hit and now - hit[0] < self.coach_rules.cache_ttl_s:
+                return hit[1].model_copy(update={"cached": True})
+            last = self._coach_last_call.get(user_id)
+            if last is not None and now - last < self.coach_rules.cooldown_s:
+                raise TrainingError("RATE_LIMITED", "Give the coach a few seconds before asking again.")
+            self._coach_last_call[user_id] = now
+
+        try:
+            text = clean(self.coach.complete(SYSTEM_INSTRUCTION, build_prompt(context)), self.coach_rules)
+        except CoachUnavailable as error:
+            logger.warning("The coach fell back to its built-in message: %s", error)
+            text = ""
+        if not text:
+            # Not remembered: a vendor hiccup shouldn't stick for an hour.
+            return self._coach_message(today, fallback_message(context), "fallback", None)
+
+        message = self._coach_message(today, text, "gemini", self.coach.model)
+        with self._coach_lock:
+            self._coach_cache[key] = (now, message)
+            self._prune_coach_state(now)
+        return message
+
+    def _coach_message(self, today: date, text: str, source: str, model: Optional[str]) -> CoachMessage:
+        return CoachMessage(
+            date=today, message=text, source=source, model=model, cached=False, notice=PLAN_NOTICE  # type: ignore[arg-type]
+        )
+
+    def _prune_coach_state(self, now: float) -> None:
+        """Drop expired entries, and the oldest ones if there are too many. Called with the lock held."""
+        ttl = self.coach_rules.cache_ttl_s
+        for key in [k for k, (stamp, _) in self._coach_cache.items() if now - stamp >= ttl]:
+            del self._coach_cache[key]
+        overflow = len(self._coach_cache) - self.coach_rules.cache_max_entries
+        if overflow > 0:
+            for key in sorted(self._coach_cache, key=lambda k: self._coach_cache[k][0])[:overflow]:
+                del self._coach_cache[key]
+        for user in [u for u, stamp in self._coach_last_call.items() if now - stamp >= ttl]:
+            del self._coach_last_call[user]
+
+    @staticmethod
+    def _coach_context(snapshot: PlanSnapshot, today: date) -> CoachContext:
+        """The only place facts are chosen for the coach. Nothing readiness-related is read here."""
+        session = snapshot.session
+        return CoachContext(
+            weekday=weekday_name(today),
+            goal=snapshot.plan.goal if snapshot.plan else None,
+            state=snapshot.state,
+            activity_type=session.activity_type if session else None,
+            planned_band=session.intensity_band if session else None,
+            duration_min=session.target_duration_min if session else None,
+            week_planned=snapshot.week.planned_sessions,
+            week_completed=snapshot.week.completed_sessions,
+            week_missed=snapshot.week.missed_sessions,
+            week_minutes=snapshot.week.logged_minutes,
+        )
+
+    def _snapshot(self, user_id: str, today: date) -> PlanSnapshot:
+        plan = self._sync(user_id, today)
+        monday = week_start(today)
+        sunday = monday + timedelta(days=6)
+        mine = [
+            s for s in self.repo.list_sessions(user_id, monday, sunday) if plan and s.plan_id == plan.id
+        ]
+        session = next((s for s in mine if s.date == today), None)
+        # Hard Rule 1: Strava rows are dropped before anything is counted.
+        workouts = modelling_workouts(self.repo.list_workouts(user_id, monday, sunday))
+        upcoming: List[PlannedSession] = []
+        if plan:
+            ahead_end = min(plan.end_date, today + timedelta(days=28))
+            upcoming = [
+                s
+                for s in self.repo.list_sessions(user_id, today + timedelta(days=1), ahead_end)
+                if s.plan_id == plan.id and s.status in MOVABLE_STATUSES
+            ]
+        following = min(upcoming, key=lambda s: s.date) if upcoming else None
+        return PlanSnapshot(
+            plan=plan,
+            session=session,
+            logged=self.repo.get_workout_for_session(user_id, session.id) if session else None,
+            week=WeekProgress(
+                start=monday,
+                end=sunday,
+                planned_sessions=len(mine),
+                completed_sessions=sum(1 for s in mine if s.status in ("completed", "partial")),
+                missed_sessions=sum(1 for s in mine if s.status == "missed"),
+                logged_minutes=sum(w.actual_duration_min for w in workouts),
+            ),
+            next_session=NextSession(
+                date=following.date,
+                activity_type=following.activity_type,
+                intensity_band=following.intensity_band,
+                target_duration_min=following.target_duration_min,
+            )
+            if following
+            else None,
         )
 
     def respond_to_session(
@@ -253,6 +477,16 @@ class TrainingService:
     def score_features(self, features: ReadinessFeatures) -> ScoreResult:
         return self.scorer.score(features)
 
+    def log_sleep(self, user_id: str, today: date, data: SleepInput) -> SleepEntry:
+        """Last night's sleep, filed under today. Entering it again replaces it. The next read of
+        today's readiness picks it up on its own, because the cached score is keyed on its inputs."""
+        hours = round(data.hours, 2)
+        self.repo.save_sleep(user_id, today, hours)
+        return SleepEntry(date=today, hours=hours)
+
+    def clear_sleep(self, user_id: str, today: date) -> None:
+        self.repo.delete_sleep(user_id, today)
+
     # ------------------------------------------------------------------ logging (T-5)
 
     def log_session(
@@ -271,15 +505,24 @@ class TrainingService:
         # Tomorrow's readiness score picks this up on its own: its cached copy is keyed on the
         # inputs, so new history changes the key and the score is recomputed.
         self.repo.apply(user_id, ChangeSet(upsert_sessions=[updated], insert_workouts=[workout]))
+        self._award_workout_xp(user_id, workout.id)
         return LogResult(workout=workout, session=updated)
 
     def log_ad_hoc_session(self, user_id: str, today: date, data: LogWorkoutInput) -> LogResult:
         self._require_not_future(data.date, today)
         workout = self._workout_from(data, None)
         self.repo.apply(user_id, ChangeSet(insert_workouts=[workout]))
+        self._award_workout_xp(user_id, workout.id)
         return LogResult(workout=workout, session=None)
 
     # ------------------------------------------------------------------ internals
+
+    def _award_workout_xp(self, user_id: str, workout_id: str) -> None:
+        """XP for the leaderboard. The workout is already saved, so nothing here may make the log fail."""
+        try:
+            self.repo.award_workout_xp(user_id, workout_id)
+        except Exception as error:  # noqa: BLE001 - an optional side effect, whatever goes wrong with it
+            logger.warning("XP for a logged workout wasn't recorded: %s", type(error).__name__)
 
     def _require_session(self, user_id: str, session_id: str) -> PlannedSession:
         session = self.repo.get_session(user_id, session_id)
@@ -320,10 +563,9 @@ class TrainingService:
             created_at=_now(),
         )
 
-    def _baseline(self, user_id: str, today: date) -> Baseline:
+    def _baseline(self, user_id: str, today: date, profile: Optional[AthleteProfile]) -> Baseline:
         window_start = week_start(today) - timedelta(weeks=self.rules.baseline_window_weeks)
         workouts = self.repo.list_workouts(user_id, window_start, today)
-        profile = self.repo.get_profile(user_id)
         return baseline_from_history(
             workouts, today, self.rules, profile.activity_level if profile else None
         )
@@ -336,8 +578,9 @@ class TrainingService:
         targets: Sequence[WeekTarget],
         from_date: date,
         taken: Set[date],
+        goal: Optional[str] = None,
     ) -> List[PlannedSession]:
-        drafts = build_sessions(preferences, start, targets, from_date, self.rules)
+        drafts = build_sessions(preferences, start, targets, from_date, self.rules, goal)
         return [
             PlannedSession(
                 id=_new_id(),
@@ -353,10 +596,17 @@ class TrainingService:
             if d.date not in taken
         ]
 
-    def _readiness(self, user_id: str, today: date) -> ReadinessScore:
+    def _readiness(self, user_id: str, today: date, sleep_hours: Optional[float]) -> ReadinessScore:
         history = self.repo.list_workouts(user_id, today - timedelta(days=28), today - timedelta(days=1))
         records = [ActivityRecord(w.date, w.actual_volume, w.avg_hr, w.source) for w in history]
-        features = build_features(records, self.repo.get_latest_checkin(user_id, today), today)
+        preferences = self.repo.get_preferences(user_id)
+        features = build_features(
+            records,
+            self.repo.get_latest_checkin(user_id, today),
+            today,
+            days_until_next_exam(preferences.exam_dates if preferences else [], today),
+            sleep_hours=sleep_hours,
+        )
         digest = fingerprint(features, self.scorer.version)
 
         cached = self.repo.get_cached_readiness(user_id, today)
@@ -378,7 +628,9 @@ class TrainingService:
         if today > plan.end_date:
             raise TrainingError("PLAN_ENDED", "Your plan has finished. Generate a new one instead.")
 
-        baseline = self._baseline(user_id, today)
+        profile = self.repo.get_profile(user_id)
+        goal = goal_for(profile, self.rules)
+        baseline = self._baseline(user_id, today, profile)
         monday = week_start(today)
         weeks_elapsed = max(0, (monday - plan.start_date).days // 7)
         remaining = plan.weeks - weeks_elapsed
@@ -388,7 +640,7 @@ class TrainingService:
         upcoming = self.repo.list_sessions(user_id, today, plan.end_date)
         drop = [s.id for s in upcoming if s.plan_id == plan.id and s.status in MOVABLE_STATUSES]
         taken = {s.date for s in upcoming if s.id not in drop}
-        sessions = self._new_sessions(plan.id, preferences, monday, targets, today, taken)
+        sessions = self._new_sessions(plan.id, preferences, monday, targets, today, taken, goal)
 
         weeks = self.rules.baseline_window_weeks
         if baseline.used_default:
@@ -410,6 +662,7 @@ class TrainingService:
         adapted = plan.model_copy(
             update={
                 "baseline_volume": baseline.volume,
+                "goal": goal,
                 "last_adaptation": PlanAdaptation(
                     trigger=trigger,
                     reason=reason,

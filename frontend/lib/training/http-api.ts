@@ -15,12 +15,15 @@ import type {
   TrainingApi,
 } from "./api";
 import type {
+  CoachMessage,
   ModelInfo,
   PlannedSession,
   Schedule,
+  SleepEntry,
   TodayView,
   TrainingPlan,
   TrainingPreferences,
+  TrainingSummary,
 } from "./types";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://localhost:8000";
@@ -38,6 +41,15 @@ function toFieldErrors(value: unknown): Record<string, string> | undefined {
   return entries.length > 0 ? Object.fromEntries(entries) : undefined;
 }
 
+/**
+ * What FastAPI's bearer check says when the request has no token. Newer releases answer 401, older
+ * ones 403, and the backend doesn't pin the version, so both mean "not signed in".
+ */
+const NOT_AUTHENTICATED = "Not authenticated";
+
+const isSignedOut = (response: Response, detail: unknown) =>
+  response.status === 401 || (response.status === 403 && detail === NOT_AUTHENTICATED);
+
 async function readError(response: Response): Promise<ApiError> {
   const body: unknown = await response.json().catch(() => null);
   const detail = isRecord(body) ? body.detail : undefined;
@@ -50,7 +62,7 @@ async function readError(response: Response): Promise<ApiError> {
       suggestedDate: typeof detail.suggestedDate === "string" ? detail.suggestedDate : null,
     };
   }
-  if (response.status === 401) {
+  if (isSignedOut(response, detail)) {
     // The shared auth dependency answers with a plain-string body, which isn't something to show.
     return { code: "UNAUTHORIZED", message: "Your session has expired. Sign in again." };
   }
@@ -59,6 +71,13 @@ async function readError(response: Response): Promise<ApiError> {
     message:
       typeof detail === "string" ? detail : `The server returned an error (${response.status}).`,
   };
+}
+
+/** Nothing on this page works without a session, so being signed out means going back to sign in. */
+function sendToSignIn() {
+  if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+    window.location.assign("/login");
+  }
 }
 
 async function buildHeaders(): Promise<Record<string, string>> {
@@ -101,7 +120,11 @@ async function request<T>(
     };
   }
 
-  if (!response.ok) return { ok: false, error: await readError(response) };
+  if (!response.ok) {
+    const error = await readError(response);
+    if (error.code === "UNAUTHORIZED") sendToSignIn();
+    return { ok: false, error };
+  }
   const data = response.status === 204 ? undefined : await response.json();
   return { ok: true, data: data as T };
 }
@@ -132,7 +155,11 @@ export const httpTrainingApi: TrainingApi = {
   removeSession: (id) => request<RemoveResult>("DELETE", sessionPath(id)),
 
   getToday: () => read<TodayView>("/today"),
+  getSummary: () => read<TrainingSummary>("/summary"),
+  getCoachMessage: () => request<CoachMessage>("POST", "/coach"),
   getReadinessModel: () => read<ModelInfo>("/model", READINESS_URL),
+  logSleep: (hours) => request<SleepEntry>("PUT", "/sleep", { hours }),
+  clearSleep: () => request<void>("DELETE", "/sleep"),
   respondToSession: (id, response) =>
     request<PlannedSession>("POST", `${sessionPath(id)}/respond`, response),
   logSession: (id, input) => request<LogResult>("POST", `${sessionPath(id)}/log`, input),

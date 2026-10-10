@@ -10,7 +10,9 @@ from fastapi.responses import JSONResponse
 
 from ..commons.auth.deps import get_current_user_id
 from .clock import get_client_date
+from .coach import load_coach
 from .models import (
+    CoachMessage,
     GeneratePlanRequest,
     LogResult,
     LogWorkoutInput,
@@ -21,10 +23,13 @@ from .models import (
     Schedule,
     ScoreResult,
     SessionResponseRequest,
+    SleepEntry,
+    SleepInput,
     TodayView,
     TrainingPlan,
     TrainingPreferences,
     TrainingPreferencesInput,
+    TrainingSummary,
 )
 from .ml.scorer import load_scorer
 from .readiness import ReadinessFeatures
@@ -40,7 +45,7 @@ readiness_router = APIRouter(prefix=READINESS_PREFIX, tags=["Readiness"])
 
 @lru_cache
 def _default_service() -> TrainingService:
-    return TrainingService(create_repository(), load_scorer())
+    return TrainingService(create_repository(), load_scorer(), coach=load_coach())
 
 
 def get_service() -> TrainingService:
@@ -61,8 +66,8 @@ def get_preferences(user_id: UserId, service: Service):
 
 
 @router.put("/preferences", response_model=TrainingPreferences)
-def put_preferences(body: TrainingPreferencesInput, user_id: UserId, service: Service):
-    return service.save_preferences(user_id, body)
+def put_preferences(body: TrainingPreferencesInput, user_id: UserId, today: Today, service: Service):
+    return service.save_preferences(user_id, today, body)
 
 
 # --------------------------------------------------------------------------- plan
@@ -121,6 +126,33 @@ def remove_session(session_id: UUID, user_id: UserId, today: Today, service: Ser
 @router.get("/today", response_model=TodayView)
 def get_today(user_id: UserId, today: Today, service: Service):
     return service.get_today(user_id, today)
+
+
+@router.get("/summary", response_model=TrainingSummary)
+def get_summary(user_id: UserId, today: Today, service: Service):
+    """One call for the Home page: readiness, today's session, the week so far and what is next."""
+    return service.get_summary(user_id, today)
+
+
+@router.post("/coach", response_model=CoachMessage)
+def post_coach(user_id: UserId, today: Today, service: Service):
+    """
+    A short note about today's training from Gemini, or a built-in message when it isn't available.
+    Gemini is given the plan and the week's progress only: never readiness, check-in answers or Strava data.
+    """
+    return service.get_coach_message(user_id, today)
+
+
+@router.put("/sleep", response_model=SleepEntry)
+def put_sleep(body: SleepInput, user_id: UserId, today: Today, service: Service):
+    """Last night's sleep, filed under the user's today. It feeds today's readiness score."""
+    return service.log_sleep(user_id, today, body)
+
+
+@router.delete("/sleep", status_code=204)
+def delete_sleep(user_id: UserId, today: Today, service: Service):
+    service.clear_sleep(user_id, today)
+    return Response(status_code=204)
 
 
 @router.post("/sessions/{session_id}/respond", response_model=PlannedSession)
