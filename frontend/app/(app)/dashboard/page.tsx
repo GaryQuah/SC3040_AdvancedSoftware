@@ -295,16 +295,6 @@ export default function HomePage() {
                 {syncMessage}
               </span>
             )}
-
-            <button
-              onClick={() => router.push("/dashboard/friends")}
-              aria-label="Go to Friends"
-              title="Friends"
-              className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:bg-slate-800 hover:text-emerald-400"
-            >
-              <Users className="h-5 w-5" />
-              <span>Friends</span>
-            </button>
           </div>
         </div>
 

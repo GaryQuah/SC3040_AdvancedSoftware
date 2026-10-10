@@ -12,6 +12,7 @@ import {
   Trophy,
   User,
   Settings,
+  Users,
 } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
@@ -102,6 +103,7 @@ export default function DashboardLayout({
     { name: "AI Assistance", href: "/dashboard/ai", icon: Sparkles },
     { name: "Leaderboard", href: "/dashboard/leaderboard", icon: Trophy },
     { name: "Settings", href: "/dashboard/settings", icon: Settings },
+    { name: "Friends", href: "/dashboard/friends", icon: Users },
   ];
 
   return (
