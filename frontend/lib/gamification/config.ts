@@ -12,6 +12,9 @@ export const GAMIFICATION_RULES = {
   challengeTitleMax: 100,
   challengeTargetMax: 100000,
   challengeMaxInvitees: 20,
+  challengeRewardXp: 100,
+  workoutXp: 50,
+  mealXp: 10,
   /** [minimum total XP, rank], ascending. */
   ranks: [
     [0, "Beginner"],
@@ -21,3 +24,9 @@ export const GAMIFICATION_RULES = {
     [4000, "Platinum"],
   ],
 } as const;
+
+/** XP for the check-in that makes the streak `streak` days long. Mirrors checkin_xp on the server. */
+export function checkInXpFor(streak: number): number {
+  const bonusDays = Math.max(Math.min(streak, GAMIFICATION_RULES.streakBonusCapDays) - 1, 0);
+  return GAMIFICATION_RULES.checkInXp + GAMIFICATION_RULES.streakBonusPerDay * bonusDays;
+}
