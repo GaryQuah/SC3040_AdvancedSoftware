@@ -20,6 +20,7 @@ import {
   Sparkles,
   Watch,
   X,
+  Users,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -34,6 +35,7 @@ import {
   CartesianGrid,
 } from "recharts";
 
+import { useRouter } from "next/navigation";
 import Calendar from "../../components/calendar";
 
 /* ------------------------------------------------------------------ */
@@ -141,6 +143,8 @@ function bmiCategory(bmi: number) {
 /* ------------------------------------------------------------------ */
 
 export default function HomePage() {
+  const router = useRouter();
+
   // Health data
   const [height, setHeight] = useState<number | null>(null);
   const [weight, setWeight] = useState<number | null>(null);
@@ -239,11 +243,24 @@ export default function HomePage() {
               Your health, training and nutrition, all in one place.
             </p>
           </div>
-          {syncMessage && (
-            <span className="text-xs font-medium text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-lg border border-emerald-500/20 w-fit">
-              {syncMessage}
-            </span>
-          )}
+
+          <div className="flex items-center gap-3">
+            {syncMessage && (
+              <span className="text-xs font-medium text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-lg border border-emerald-500/20 w-fit">
+                {syncMessage}
+              </span>
+            )}
+
+            <button
+              onClick={() => router.push("/dashboard/friends")}
+              aria-label="Go to Friends"
+              title="Friends"
+              className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:border-emerald-500/50 hover:bg-slate-800 hover:text-emerald-400"
+            >
+              <Users className="h-5 w-5" />
+              <span>Friends</span>
+            </button>
+          </div>
         </div>
 
         {/* Health data + Check-in row */}
