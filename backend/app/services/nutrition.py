@@ -17,6 +17,7 @@ from supabase import Client
 
 from app.commons.config import get_settings
 from app.models.nutrition import (
+    CalorieTargetsUpdate,
     FoodItem,
     MealAnalysis,
     MealCreate,
@@ -312,7 +313,7 @@ def fetch_batch_calories(
         start_date, time.min, timezone(timedelta(minutes=offset_minutes))
     )
     end_time = datetime.combine(
-        end_date, time.max, timezone(timedelta(minutes=offset_minutes))
+        end_date + timedelta(days=1), time.min, timezone(timedelta(minutes=offset_minutes))
     )
     start_iso = start_time.astimezone(timezone.utc).isoformat()
     end_iso = end_time.astimezone(timezone.utc).isoformat()
@@ -383,9 +384,80 @@ def fetch_batch_calories(
         logs.append(
             {
                 "date": current_date.isoformat(),
+                "meal_count": len(day_meals),
                 "total_calories": total_calories,
                 "active_calories": active_calories,
             }
         )
         current_date += timedelta(days=1)
     return logs
+
+
+def save_calorie_targets(db: Client, user_id: str, body: CalorieTargetsUpdate) -> list[dict]:
+    rows = [{"user_id": user_id, **target.model_dump(mode="json")} for target in body.targets]
+    return (
+        db.table("nutrition_calorie_targets")
+        .upsert(rows, on_conflict="user_id,date")
+        .execute()
+        .data
+    )
+
+
+def calorie_calendar(
+    db: Client, user_id: str, start_date: date, end_date: date, offset_minutes: int
+) -> list[dict]:
+    logs = fetch_batch_calories(db, user_id, start_date, end_date, offset_minutes)
+    targets = (
+        db.table("nutrition_calorie_targets")
+        .select("date,target_calories")
+        .eq("user_id", user_id)
+        .gte("date", start_date.isoformat())
+        .lt("date", (end_date + timedelta(days=1)).isoformat())
+        .execute()
+        .data
+    )
+    by_date = {row["date"]: row["target_calories"] for row in targets}
+    profiles = (
+        db.table("users")
+        .select("age,weight,height,biological_sex,activity_level,fitness_goal")
+        .eq("user_id", user_id)
+        .limit(1)
+        .execute()
+        .data
+    )
+    profile = profiles[0] if profiles else {}
+    default_target = None
+    multipliers = {
+        "SEDENTARY": 1.2,
+        "LIGHTLY_ACTIVE": 1.375,
+        "MODERATELY_ACTIVE": 1.55,
+        "VERY_ACTIVE": 1.725,
+        "EXTRA_ACTIVE": 1.9,
+    }
+    offsets = {"DEFICIT": -500, "MAINTAIN": 0, "SURPLUS": 500}
+    if all(profile.get(key) and profile[key] > 0 for key in ("age", "weight", "height")) and (
+        profile.get("biological_sex") in {"MALE", "FEMALE"}
+        and profile.get("activity_level") in multipliers
+        and profile.get("fitness_goal") in offsets
+    ):
+        bmr = 10 * profile["weight"] + 6.25 * profile["height"] - 5 * profile["age"]
+        bmr += 5 if profile["biological_sex"] == "MALE" else -161
+        # Match the Settings page's Math.round for positive calorie targets.
+        calculated = int(
+            bmr * multipliers[profile["activity_level"]]
+            + offsets[profile["fitness_goal"]]
+            + 0.5
+        )
+        if calculated > 0:
+            default_target = calculated
+    return [
+        {
+            **log,
+            "total_calories": log["total_calories"] if log["meal_count"] else 0,
+            "target_calories": by_date.get(log["date"], default_target),
+            "target_source": "saved" if log["date"] in by_date else (
+                "profile" if default_target is not None else None
+            ),
+        }
+        for log in logs
+    ]

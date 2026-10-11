@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import CalorieCalendar from "./calorie-calendar";
 import { ArrowRight, Camera, Check, Flame, Leaf, LoaderCircle, Plus, ScanLine, Sparkles, Trash2, Upload, Utensils } from "lucide-react";
 import { analyzeMeal, deleteMeal, fetchDailyLog, mealTotals, mealTypes, saveMeal, scaleItem, type DailyLog, type FoodItem, type MealEstimate, type MealType } from "@/lib/nutrition";
 
@@ -111,6 +112,7 @@ export default function MealAnalysis() {
       <div><p className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.2em] text-emerald-400"><Leaf size={14} /> Nutrition</p><h1 className="text-3xl font-bold tracking-tight sm:text-4xl">Fuel your next best.</h1><p className="mt-3 max-w-xl text-sm leading-6 text-slate-400">A little clarity on your plate. Capture a meal, review the details, and keep your recovery on track.</p></div>
       <span className="flex items-center gap-2 rounded-full border border-emerald-900 bg-emerald-950/40 px-3 py-2 text-xs text-emerald-300"><Sparkles size={14} /> AI-assisted meal analysis</span>
     </header>
+    <CalorieCalendar selectedDay={day} onSelectDay={setDay} revision={revision} />
     <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-slate-400">{["Capture your meal", "Review & adjust", "Save to your day"].map((step, index) => <span key={step} className="flex items-center gap-2"><span className="flex h-6 w-6 items-center justify-center rounded-full border border-slate-700 text-emerald-400">{index + 1}</span>{step}{index < 2 && <ArrowRight size={13} className="ml-2 text-slate-700" />}</span>)}</div>
     {error && <div role="alert" className="rounded-xl border border-rose-900 bg-rose-950/40 p-4 text-sm text-rose-200">{error}</div>}
     {success && <div role="status" className="flex items-center gap-2 rounded-xl border border-emerald-800 bg-emerald-950/40 p-4 text-sm text-emerald-200"><Check size={18} />{success}</div>}
