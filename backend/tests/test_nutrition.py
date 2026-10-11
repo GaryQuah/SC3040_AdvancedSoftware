@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -340,14 +341,82 @@ async def test_missing_ai_key(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_gemini_request_serializes_with_real_sdk(monkeypatch):
+    data = payload()
+    estimate = {
+        key: data[key]
+        for key in ("meal_name", "confidence_score", "training_context_note", "items")
+    }
+    requests = []
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": json.dumps(estimate)}],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ],
+            },
+        )
+
+    client_factory = nutrition.genai.Client
+    monkeypatch.setattr(
+        nutrition,
+        "get_settings",
+        lambda: SimpleNamespace(
+            GOOGLE_GENERATIVE_AI_API_KEY="fixture-key",
+            GEMINI_NUTRITION_MODEL="gemini-3.1-flash-lite",
+        ),
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http_client:
+        monkeypatch.setattr(
+            nutrition.genai,
+            "Client",
+            lambda **kwargs: client_factory(
+                api_key=kwargs["api_key"],
+                http_options=nutrition.types.HttpOptions(httpx_async_client=http_client),
+            ),
+        )
+        result = await nutrition.analyze_image(image_bytes(), "after run")
+
+    assert result.total_calories == 195
+    assert len(requests) == 1
+    schema = requests[0]["generationConfig"]["responseSchema"]
+    weight_schema = schema["properties"]["items"]["items"]["properties"]["estimated_weight_g"]
+    assert "minimum" not in weight_schema
+    assert "maximum" not in weight_schema
+    assert "exclusiveMinimum" not in weight_schema
+    assert "maxItems" not in schema["properties"]["items"]
+    assert "additionalProperties" not in schema
+    assert "maxLength" not in schema["properties"]["meal_name"]
+    assert requests[0]["contents"][0]["parts"][0]["inlineData"]["mimeType"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario,expected",
     [
         ("valid", 200),
         ("empty", 422),
         ("invalid", 422),
+        ("zero_weight", 422),
+        ("negative_nutrient", 422),
+        ("invalid_confidence", 422),
+        ("too_many_items", 422),
         ("timeout", 504),
         ("quota", 429),
+        ("bad_request", 502),
+        ("credentials", 502),
+        ("denied", 502),
+        ("missing_model", 502),
+        ("unavailable", 502),
     ],
 )
 async def test_gemini_response_handling(monkeypatch, scenario, expected):
@@ -358,13 +427,29 @@ async def test_gemini_response_handling(monkeypatch, scenario, expected):
     }
     if scenario == "empty":
         estimate["items"] = []
+    if scenario == "zero_weight":
+        estimate["items"][0]["estimated_weight_g"] = 0
+    if scenario == "negative_nutrient":
+        estimate["items"][0]["calories"] = -1
+    if scenario == "invalid_confidence":
+        estimate["confidence_score"] = 80
+    if scenario == "too_many_items":
+        estimate["items"] *= 51
     response_text = "not JSON" if scenario == "invalid" else json.dumps(estimate)
     generate = AsyncMock(return_value=SimpleNamespace(text=response_text))
     if scenario == "timeout":
         generate.side_effect = TimeoutError()
-    if scenario == "quota":
-        generate.side_effect = nutrition.errors.ClientError(
-            429, {"error": {"message": "quota"}}
+    provider_errors = {
+        "quota": (429, "usage limit"),
+        "bad_request": (400, "rejected the request"),
+        "credentials": (401, "credentials are invalid"),
+        "denied": (403, "access is denied"),
+        "missing_model": (404, "configured analysis model"),
+        "unavailable": (503, "temporarily unavailable"),
+    }
+    if scenario in provider_errors:
+        generate.side_effect = nutrition.errors.APIError(
+            provider_errors[scenario][0], {"error": {"message": "provider error"}}
         )
 
     class AsyncClient:
@@ -391,6 +476,8 @@ async def test_gemini_response_handling(monkeypatch, scenario, expected):
         with pytest.raises(HTTPException) as exc:
             await nutrition.analyze_image(image_bytes(), "after run")
         assert exc.value.status_code == expected
+        if scenario in provider_errors:
+            assert provider_errors[scenario][1] in exc.value.detail
     else:
         result = await nutrition.analyze_image(image_bytes(), "after run")
         assert result.total_calories == 195
