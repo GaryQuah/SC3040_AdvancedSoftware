@@ -4,8 +4,9 @@
  *
  * Everything here is a stand-in: the real server owns generation, readiness and the rules.
  */
-import { TRAINING_RULES as R } from "./config";
+import { FORECAST_RULES as F, TRAINING_RULES as R } from "./config";
 import { addDays, diffDays, startOfWeek, todayISO } from "./dates";
+import { acwrOf, buildForecast, fmt, forecastView, type LoadForecast } from "./forecast";
 import {
   baselineFromHistory,
   buildSessions,
@@ -42,6 +43,7 @@ import type { ApiError, ApiResult, LogResult, TrainingApi } from "./api";
 import type {
   CoachMessage,
   Goal,
+  ForecastView,
   IntensityBand,
   ModelInfo,
   NextSession,
@@ -103,6 +105,24 @@ function mockGoal(): Goal | null {
   return asked === "lose_weight" || asked === "build_muscle" || asked === "maintain" ? asked : "maintain";
 }
 
+/** The athlete's load forecast as of `today`, from what they logged (Strava never exists in the fixtures). */
+function currentForecast(s: MockState, today: string): LoadForecast {
+  const since = addDays(startOfWeek(today), -7 * Math.max(F.windowWeeks, F.adherenceWindowWeeks));
+  const workouts = s.workouts.filter((w) => w.date >= since && w.date <= today);
+  const sessions = s.sessions.filter((x) => x.date >= since && x.date < startOfWeek(today));
+  return buildForecast(workouts, sessions, acwrOf(workouts, today), today);
+}
+
+/** The weekly targets for a plan and the progression they use: the forecast's, or the standard if that isn't safe. */
+function planTargets(baseline: number, weeks: number, weekOffset: number, forecast: LoadForecast) {
+  const learned = weeklyTargets(baseline, weeks, weekOffset, forecast.ratePct);
+  if (firstUnsafeWeek(learned) === -1) return { targets: learned, progression: forecast.ratePct };
+  return {
+    targets: weeklyTargets(baseline, weeks, weekOffset, R.weeklyProgressionPct),
+    progression: R.weeklyProgressionPct,
+  };
+}
+
 /** Every workout the fixtures make is the athlete's own: Strava logs only come from the real backend. */
 function makeWorkout(
   fields: Omit<WorkoutSession, "id" | "createdAt" | "externalId" | "distanceM"> & { distanceM?: number | null },
@@ -110,9 +130,14 @@ function makeWorkout(
   return { id: nextId("w"), createdAt: new Date().toISOString(), externalId: null, distanceM: null, ...fields };
 }
 
+/**
+ * Weeks of rising load that a forecast can learn from: three logged sessions a week for the 8 weeks before
+ * `endExclusive` (a Monday), each week a little heavier than the last apart from one lighter week.
+ */
+const SEED_WEEK_FACTORS = [0.8, 0.84, 0.88, 0.84, 0.92, 0.96, 1.0, 1.04];
+
 const toMetres = (km: number | null) => (km === null ? null : Math.round(km * 10000) / 10);
 
-/** Three logged sessions a week for the 4 weeks before `endExclusive` (a Monday). */
 function seedHistory(endExclusive: string): WorkoutSession[] {
   const pattern = [
     { day: 0, activityType: "run", volume: 34 },
@@ -120,9 +145,11 @@ function seedHistory(endExclusive: string): WorkoutSession[] {
     { day: 5, activityType: "cycling", volume: 36 },
   ] as const;
   const history: WorkoutSession[] = [];
-  for (let week = 4; week >= 1; week--) {
+  for (let week = SEED_WEEK_FACTORS.length; week >= 1; week--) {
     const monday = addDays(endExclusive, -7 * week);
-    for (const { day, activityType, volume } of pattern) {
+    const factor = SEED_WEEK_FACTORS[SEED_WEEK_FACTORS.length - week];
+    for (const { day, activityType, volume: standard } of pattern) {
+      const volume = Math.round(standard * factor);
       history.push(
         makeWorkout({
           plannedSessionId: null,
@@ -158,6 +185,12 @@ function seedState(scenario: "active" | "new"): MockState {
   const weeks = 8;
   const workouts = seedHistory(planStart);
   const baseline = baselineFromHistory(workouts, planStart);
+  const seeded = planTargets(
+    baseline.volume,
+    weeks,
+    0,
+    buildForecast(workouts, [], acwrOf(workouts, planStart), planStart),
+  );
   const plan: TrainingPlan = {
     id: nextId("p"),
     startDate: planStart,
@@ -169,13 +202,14 @@ function seedState(scenario: "active" | "new"): MockState {
     notice: PLAN_NOTICE,
     goal: mockGoal(),
     lastAdaptation: null,
+    progressionPct: seeded.progression,
   };
 
   let pastIndex = 0;
   const drafts = buildSessions({
     prefs: SEED_PREFERENCES,
     startDate: planStart,
-    targets: weeklyTargets(baseline.volume, weeks),
+    targets: seeded.targets,
     fromDate: planStart,
     goal: plan.goal,
   });
@@ -526,7 +560,12 @@ export const mockTrainingApi: TrainingApi = {
     }
 
     const baseline = baselineFromHistory(s.workouts, today);
-    const targets = weeklyTargets(baseline.volume, parsed.data.weeks);
+    const { targets, progression } = planTargets(
+      baseline.volume,
+      parsed.data.weeks,
+      0,
+      currentForecast(s, today),
+    );
     const unsafeWeek = firstUnsafeWeek(targets);
     if (unsafeWeek !== -1) {
       return fail(
@@ -547,6 +586,7 @@ export const mockTrainingApi: TrainingApi = {
       notice: PLAN_NOTICE,
       goal: mockGoal(),
       lastAdaptation: null,
+      progressionPct: progression,
     };
     // Only sessions still to do are dropped; anything already completed, partial or missed is history.
     const previous = s.plan;
@@ -580,7 +620,12 @@ export const mockTrainingApi: TrainingApi = {
     const monday = startOfWeek(today);
     const weeksElapsed = diffDays(monday, plan.startDate) / 7;
     const remainingWeeks = plan.weeks - weeksElapsed;
-    const targets = weeklyTargets(baseline.volume, remainingWeeks, weeksElapsed);
+    const { targets, progression } = planTargets(
+      baseline.volume,
+      remainingWeeks,
+      weeksElapsed,
+      currentForecast(s, today),
+    );
 
     s.sessions = s.sessions.filter(
       (x) => !(x.planId === plan.id && x.date >= today && MOVABLE_STATUSES.includes(x.status)),
@@ -595,14 +640,19 @@ export const mockTrainingApi: TrainingApi = {
     const previousBaseline = plan.baselineVolume;
     plan.baselineVolume = baseline.volume;
     plan.goal = mockGoal();
+    plan.progressionPct = progression;
+    const pace =
+      progression !== R.weeklyProgressionPct
+        ? ` Weekly progression is now ${fmt(progression)}% instead of the standard ${fmt(R.weeklyProgressionPct)}%: see the load forecast on the Plan tab.`
+        : "";
     plan.lastAdaptation = {
       trigger: "manual",
       adaptedAt: new Date().toISOString(),
       adaptedOn: today,
       acknowledged: false,
-      reason: baseline.usedDefault
+      reason: (baseline.usedDefault
         ? `You have fewer than ${R.minHistoryWeeksForBaseline} weeks of completed training in the last 4 weeks, so a conservative default of ${baseline.volume} pts/week was used. Only the remaining ${remainingWeeks} week(s) were regenerated.`
-        : `Rebaselined from your ${baseline.sessionCount} completed sessions in the last 4 weeks: ${previousBaseline} to ${baseline.volume} pts/week. Only the remaining ${remainingWeeks} week(s) were regenerated.`,
+        : `Rebaselined from your ${baseline.sessionCount} completed sessions in the last 4 weeks: ${previousBaseline} to ${baseline.volume} pts/week. Only the remaining ${remainingWeeks} week(s) were regenerated.`) + pace,
     };
     return ok(plan);
   },
@@ -611,6 +661,13 @@ export const mockTrainingApi: TrainingApi = {
     await delay(50);
     const adaptation = getState().plan?.lastAdaptation;
     if (adaptation) adaptation.acknowledged = true;
+  },
+
+  async getForecast() {
+    await delay();
+    const s = getState();
+    const view: ForecastView = forecastView(currentForecast(s, todayISO()), s.plan?.progressionPct ?? null);
+    return clone(view);
   },
 
   async getSchedule(from, to) {

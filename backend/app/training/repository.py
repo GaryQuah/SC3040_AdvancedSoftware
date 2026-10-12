@@ -100,6 +100,8 @@ class TrainingRepository(Protocol):
 
     def apply(self, user_id: str, changes: ChangeSet) -> None: ...
 
+    def supports_plan_progression(self) -> bool: ...
+
 
 def changes_payload(changes: ChangeSet) -> Dict[str, Any]:
     """JSON for the `training_apply_changes` function. Rows carry no user id; the function adds it."""
@@ -332,10 +334,35 @@ class SupabaseTrainingRepository:
                 "Distance isn't set up on this database yet. Apply the latest training migration, "
                 "or log the workout without a distance.",
             )
+        if any(plan.progression_pct is not None for plan in changes.upsert_plans) and not self.supports_plan_progression():
+            raise TrainingError(
+                "UNAVAILABLE",
+                "Weekly progression isn't set up on this database yet. Apply the latest training migration.",
+            )
         self.db.rpc(
             "training_apply_changes",
             {"p_user_id": user_id, "p_changes": changes_payload(changes)},
         ).execute()
+
+    def supports_plan_progression(self) -> bool:
+        """
+        Whether the write function keeps a plan's weekly progression. The migration that adds the column also makes
+        `training_schema_features()` say so; the column alone doesn't prove the function writes it. Until it does, plans
+        are built at the standard rate and nothing is dropped quietly. Only a yes is remembered, so applying the
+        migration takes effect without a restart.
+        """
+        if "progression" in self._features_ready:
+            return True
+        try:
+            features = self.db.rpc("training_schema_features", {}).execute().data
+        except APIError as error:
+            if error.code not in _FUNCTION_NOT_READY:
+                raise
+            return False
+        if isinstance(features, dict) and features.get("progression") is True:
+            self._features_ready.add("progression")
+            return True
+        return False
 
     def _require_feature(self, feature: str, refusal_message: str) -> None:
         """
