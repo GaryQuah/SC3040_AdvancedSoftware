@@ -28,6 +28,7 @@ import type {
   TrainingPreferences,
   TrainingSummary,
   WorkoutSession,
+  IntensityBand
 } from "./types";
 
 export type ApiErrorCode =
