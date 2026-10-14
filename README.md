@@ -1,6 +1,4 @@
-# FITRA — Two-Tier Endurance Intelligence & Recovery Platform
-
-> **FITRA** is a smart platform for tracking your nutritional intake and training progress.
+# FITRA — Two-Tier Smart nutritional and training platform. 
 >
 > 1. **Frontend (`frontend/`):** Next.js 15+ App Router, React 19, TypeScript, Tailwind CSS
 > 2. **Backend (`backend/`):** Python FastAPI, Google Gemini 2.5 for AI coaching, Supabase for database management.
