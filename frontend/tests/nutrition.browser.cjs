@@ -72,7 +72,7 @@ async function main() {
       if (req.url().endsWith("/analyze")) {
         analysisCalls++;
         return route.fulfill({ headers, json: { meal_name: "Photo rice bowl", confidence_score: 0.85,
-          training_context_note: "Estimated meal for recovery.", items: [{ name: "Rice", estimated_weight_g: 100, calories: 200, protein_g: 4, carbs_g: 42, fat_g: 0.5 }] } });
+          training_context_note: "Estimated meal for recovery.", items: [{ name: "Rice", estimated_weight_g: 100, calories: 200, protein_g: 0, carbs_g: 42, fat_g: 0 }] } });
       }
       if (req.method() === "POST") {
         savedBody = req.postDataJSON();
@@ -121,7 +121,16 @@ async function main() {
     await page.getByText("85% visual confidence").waitFor();
     assert.equal(analysisCalls, 1);
     assert.equal(meals.length, 0);
-    await page.getByRole("button", { name: "Discard draft", exact: true }).click();
+    assert.equal(await page.getByLabel("Protein (g)", { exact: true }).inputValue(), "");
+    assert.equal(await page.getByLabel("Fat (g)", { exact: true }).inputValue(), "");
+    await page.getByLabel("Carbs (g)", { exact: true }).fill("");
+    await page.getByRole("button", { name: "Confirm & log meal" }).click();
+    await page.getByText("Meal saved. Your daily totals have been updated.").waitFor();
+    for (const macro of ["protein_g", "carbs_g", "fat_g"]) assert.equal(savedBody.items[0][macro], 0);
+    await page.locator("summary").filter({ hasText: "Photo rice bowl" }).click();
+    await page.getByRole("button", { name: "Delete meal", exact: true }).click();
+    await page.getByRole("button", { name: "Yes, delete" }).click();
+    await page.getByText("A fresh plate, a fresh start.").waitFor();
     await page.getByRole("button", { name: "Or enter a meal manually" }).click();
     await page.getByLabel("Meal name", { exact: true }).fill("Test rice bowl");
     await page.getByLabel("Ingredient 1 name").fill("Rice");
